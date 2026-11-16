@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Timbre Lab — Modular WebAudio Instrument Designer</title>
+    <meta name="description" content="Modular WebAudio synthesizer workstation with node-graph patching, real-time oscilloscope and FFT scopes, General MIDI and world ethnic presets, Web MIDI support, and an embeddable JavaScript synth library." />
+    <meta property="og:title" content="Timbre Lab — Modular WebAudio Instrument Designer" />
+    <meta property="og:description" content="Design custom instruments with FM, subtractive, and physical modeling synthesis, inspect real-time waveforms, and export JSON patches for the embeddable WebAudio JS engine." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      try {
+        if (localStorage.getItem('timbre_lab_theme') === 'dark') {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {}
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body class="bg-[#F4F6FA] dark:bg-[#07090E] text-slate-900 dark:text-slate-100 antialiased selection:bg-amber-500/25 selection:text-amber-950 dark:selection:text-amber-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

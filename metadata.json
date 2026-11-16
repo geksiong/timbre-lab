@@ -1,0 +1,6 @@
+{
+  "name": "Timbre Lab",
+  "description": "Modular WebAudio synthesizer studio for musical instrument design, real-time amber/cyan waveform visualization, General MIDI & world ethnic presets, Web MIDI control, and an embeddable JS synth engine.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
