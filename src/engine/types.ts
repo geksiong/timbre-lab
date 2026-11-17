@@ -41,6 +41,8 @@ export interface ParamSpec {
   defaultValue: number | string | boolean;
   /** Plain-English explanation shown in the inspector */
   tooltip?: string;
+  /** Optional visibility predicate evaluated against the node's active params */
+  visibleWhen?: (params: Record<string, number | string | boolean>) => boolean;
 }
 
 export interface ModuleDefinition {

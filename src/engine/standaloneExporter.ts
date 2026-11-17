@@ -1,3 +1,5 @@
+import { ALTERNATIVE_CARRIER_WORKLET_CODE } from './carrierWaves';
+
 export function generateStandaloneEngineSource(): string {
   return `/**
  * Timbre Lab — Standalone Embeddable WebAudio Synthesizer Engine (ESM)
@@ -379,10 +381,27 @@ registerProcessor('timbre-karplus-processor', KarplusStrongProcessor);
 registerProcessor('timbre-safety-limiter', SafetyLimiterProcessor);
 registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
+${ALTERNATIVE_CARRIER_WORKLET_CODE}
 \`;
 
 const VALID_OSC_TYPES = new Set(['sine', 'square', 'sawtooth', 'triangle']);
+const ALT_CARRIER_MODES = { pulse: 0, filteredNoise: 1, customHarmonics: 2, vocalFormant: 3, wavetable: 4 };
+const WT_BANK_MAP = { analog: 0, vocal: 1, bell: 2, bowed: 3, digital: 4, sub: 5 };
 const VALID_FILTER_TYPES = new Set(['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']);
+
+function parseHarmonicsArr(raw) {
+  const out = new Array(16).fill(0);
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parts = raw.split(',');
+    for (let i = 0; i < 16; i++) {
+      const v = Number(parts[i]);
+      out[i] = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+    }
+    if (out.every((x) => x === 0)) out[0] = 1;
+    return out;
+  }
+  return [1, 0.5, 0.33, 0.25, 0.2, 0.16, 0.14, 0.12, 0.1, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02];
+}
 
 function safeOscType(v, fallback = 'sine') {
   const s = String(v || fallback);
@@ -861,17 +880,67 @@ export class TimbreLabSynth {
         const detune = clampFinite(p.detune, -100, 100, 0);
         const uDetune = clampFinite(p.unisonDetune, 0, 60, 14);
         const spread = clampFinite(p.stereoSpread, 0, 1, 0.55);
-        for (let i = 0; i < count; i++) {
-          const osc = track(ctx.createOscillator()), pan = track(ctx.createStereoPanner()), sg = track(ctx.createGain());
-          sg.gain.value = 1 / Math.sqrt(count);
-          if (this.periodicWaves.has(wf)) osc.setPeriodicWave(this.periodicWaves.get(wf));
-          else osc.type = safeOscType(wf, 'sawtooth');
-          const norm = count === 1 ? 0 : (i / (count - 1)) * 2 - 1;
-          osc.frequency.value = freq;
-          osc.detune.value = detune + norm * uDetune;
-          pan.pan.value = norm * spread;
-          pSum.connect(osc.detune); osc.connect(sg); sg.connect(pan); pan.connect(g);
-          osc.start(now); stops.push(() => osc.stop());
+        let altOk = false;
+        if (wf in ALT_CARRIER_MODES && this.workletReady) {
+          try {
+            const sConst = track(ctx.createConstantSource()), pwC = track(ctx.createConstantSource()), wtC = track(ctx.createConstantSource()), vwC = track(ctx.createConstantSource()), shC = track(ctx.createConstantSource()), ncC = track(ctx.createConstantSource()), nqC = track(ctx.createConstantSource());
+            [sConst, pwC, wtC, vwC, shC, ncC, nqC].forEach((c) => { c.offset.value = 0; c.start(now); stops.push(() => c.stop()); });
+            const parsedH = wf === 'customHarmonics' ? parseHarmonicsArr(p.customHarmonics) : null;
+            for (let i = 0; i < count; i++) {
+              const w = track(new AudioWorkletNode(ctx, 'timbre-carrier-processor', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] }));
+              const pan = track(ctx.createStereoPanner()), sg = track(ctx.createGain());
+              sg.gain.value = 1 / Math.sqrt(count);
+              const norm = count === 1 ? 0 : (i / (count - 1)) * 2 - 1;
+              w.parameters.get('mode').value = ALT_CARRIER_MODES[wf];
+              w.parameters.get('frequency').value = freq;
+              w.parameters.get('detune').value = detune + norm * uDetune;
+              w.parameters.get('pulseWidth').value = clampFinite(p.pulseWidth, 0.04, 0.96, 0.35);
+              w.parameters.get('wavetableBank').value = WT_BANK_MAP[String(p.wavetableBank || 'analog')] || 0;
+              w.parameters.get('wavetablePos').value = clampFinite(p.wavetablePos, 0, 1, 0.25);
+              w.parameters.get('formantVowel').value = clampFinite(p.formantVowel, 0, 4, 0);
+              w.parameters.get('formantShift').value = clampFinite(p.formantShift, -12, 12, 0);
+              w.parameters.get('noiseCutoff').value = clampFinite(p.noiseCutoff, 0.25, 4, 1);
+              w.parameters.get('noiseQ').value = clampFinite(p.noiseQ, 0.5, 32, 8);
+              if (parsedH) w.port.postMessage({ type: 'harmonics', values: parsedH });
+              pSum.connect(w.parameters.get('detune'));
+              sConst.connect(w.parameters.get('shapeCv'));
+              pwC.connect(w.parameters.get('pulseWidth'));
+              wtC.connect(w.parameters.get('wavetablePos'));
+              vwC.connect(w.parameters.get('formantVowel'));
+              shC.connect(w.parameters.get('formantShift'));
+              ncC.connect(w.parameters.get('noiseCutoff'));
+              nqC.connect(w.parameters.get('noiseQ'));
+              pan.pan.value = norm * spread;
+              w.connect(sg); sg.connect(pan); pan.connect(g);
+              stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            }
+            cvTarget.set(node.id + ':shape', { param: sConst.offset, scale: 1.0 });
+            modTargets.set(node.id + ':pulseWidth', { param: pwC.offset, scale: 0.45 });
+            modTargets.set(node.id + ':wavetablePos', { param: wtC.offset, scale: 0.55 });
+            modTargets.set(node.id + ':formantVowel', { param: vwC.offset, scale: 2.0 });
+            modTargets.set(node.id + ':formantShift', { param: shC.offset, scale: 8.0 });
+            modTargets.set(node.id + ':noiseCutoff', { param: ncC.offset, scale: 1.5 });
+            modTargets.set(node.id + ':noiseQ', { param: nqC.offset, scale: 12.0 });
+            altOk = true;
+          } catch { altOk = false; }
+        }
+        if (!altOk) {
+          for (let i = 0; i < count; i++) {
+            const osc = track(ctx.createOscillator()), pan = track(ctx.createStereoPanner()), sg = track(ctx.createGain());
+            sg.gain.value = 1 / Math.sqrt(count);
+            if (this.periodicWaves.has(wf)) osc.setPeriodicWave(this.periodicWaves.get(wf));
+            else if (wf === 'customHarmonics') {
+              const r = new Float32Array(17), im = new Float32Array(17), h = parseHarmonicsArr(p.customHarmonics);
+              for (let k = 0; k < 16; k++) im[k + 1] = h[k];
+              osc.setPeriodicWave(ctx.createPeriodicWave(r, im));
+            } else osc.type = safeOscType(wf, 'sawtooth');
+            const norm = count === 1 ? 0 : (i / (count - 1)) * 2 - 1;
+            osc.frequency.value = freq;
+            osc.detune.value = detune + norm * uDetune;
+            pan.pan.value = norm * spread;
+            pSum.connect(osc.detune); osc.connect(sg); sg.connect(pan); pan.connect(g);
+            osc.start(now); stops.push(() => osc.stop());
+          }
         }
         audioOut.set(node.id + ':out', amp);
         cvTarget.set(node.id + ':pitch', { param: pConst.offset, scale: 1200 });
@@ -880,25 +949,60 @@ export class TimbreLabSynth {
         modTargets.set(node.id + ':detune', { param: pConst.offset, scale: 100 });
         modTargets.set(node.id + ':gain', { param: g.gain, scale: 0.8 });
       } else if (node.type === 'fmOperator') {
-        const c = track(ctx.createOscillator()), m = track(ctx.createOscillator()), mg = track(ctx.createGain()), g = track(ctx.createGain()), amp = track(ctx.createGain());
+        const m = track(ctx.createOscillator()), mg = track(ctx.createGain()), g = track(ctx.createGain()), amp = track(ctx.createGain());
         const nSrc = track(ctx.createBufferSource()), nBp = track(ctx.createBiquadFilter()), nFm = track(ctx.createGain()), modAudioIn = track(ctx.createGain());
         nSrc.buffer = this.noiseWhite; nSrc.loop = true; nBp.type = 'bandpass'; nBp.Q.value = 1.6;
         nBp.frequency.value = clampFinite(p.noiseBandwidth, 200, Math.min(12000, nyquistSafe * 0.9), 2400);
         nFm.gain.value = clampFinite(p.noiseFmDepth, 0, 1200, 0) * (0.45 + velNorm * 0.55);
         modAudioIn.gain.value = 650;
-        c.type = safeOscType(p.carrierWave, 'sine'); m.type = safeOscType(p.modWave, 'sine');
+        const cwf = String(p.carrierWave || 'sine');
+        m.type = safeOscType(p.modWave, 'sine');
         const cf = clampFinite(baseFreq * Math.pow(2, clampFinite(p.octave, -3, 3, 0) + this.pitchBendSemitones / 12), 15, Math.min(14000, nyquistSafe), 220);
-        c.frequency.value = cf; m.frequency.value = clampFinite(cf * clampFinite(p.ratio, 0.25, 16, 2), 10, nyquistSafe, 440);
+        m.frequency.value = clampFinite(cf * clampFinite(p.ratio, 0.25, 16, 2), 10, nyquistSafe, 440);
         mg.gain.value = clampFinite(p.modIndex, 0, 2000, 260) * (0.4 + velNorm * 0.6);
         g.gain.value = clampFinite(p.gain, 0, 1.5, 0.75) * velNorm;
-        m.connect(mg); mg.connect(c.frequency); nSrc.connect(nBp); nBp.connect(nFm); nFm.connect(c.frequency); modAudioIn.connect(c.frequency);
-        c.connect(g); g.connect(amp); c.start(now); m.start(now); nSrc.start(now); stops.push(() => { c.stop(); m.stop(); nSrc.stop(); });
+        m.connect(mg); nSrc.connect(nBp); nBp.connect(nFm); g.connect(amp);
+        let altFmOk = false;
+        if (cwf in ALT_CARRIER_MODES && this.workletReady) {
+          try {
+            const cw = track(new AudioWorkletNode(ctx, 'timbre-carrier-processor', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] }));
+            const cfp = cw.parameters.get('frequency'), cdp = cw.parameters.get('detune');
+            cw.parameters.get('mode').value = ALT_CARRIER_MODES[cwf];
+            cfp.value = cf;
+            cw.parameters.get('pulseWidth').value = clampFinite(p.pulseWidth, 0.04, 0.96, 0.35);
+            cw.parameters.get('wavetableBank').value = WT_BANK_MAP[String(p.wavetableBank || 'analog')] || 0;
+            cw.parameters.get('wavetablePos').value = clampFinite(p.wavetablePos, 0, 1, 0.25);
+            cw.parameters.get('formantVowel').value = clampFinite(p.formantVowel, 0, 4, 0);
+            cw.parameters.get('formantShift').value = clampFinite(p.formantShift, -12, 12, 0);
+            cw.parameters.get('noiseCutoff').value = clampFinite(p.noiseCutoff, 0.25, 4, 1);
+            cw.parameters.get('noiseQ').value = clampFinite(p.noiseQ, 0.5, 32, 8);
+            if (cwf === 'customHarmonics') cw.port.postMessage({ type: 'harmonics', values: parseHarmonicsArr(p.customHarmonics) });
+            mg.connect(cfp); nFm.connect(cfp); modAudioIn.connect(cfp); cw.connect(g);
+            m.start(now); nSrc.start(now); stops.push(() => { try { cw.port.postMessage('stop'); } catch {} m.stop(); nSrc.stop(); });
+            cvTarget.set(node.id + ':pitch', { param: cdp, scale: 1200 });
+            cvTarget.set(node.id + ':shape', { param: cw.parameters.get('shapeCv'), scale: 1.0 });
+            modTargets.set(node.id + ':pitch', { param: cdp, scale: 1200 });
+            modTargets.set(node.id + ':pulseWidth', { param: cw.parameters.get('pulseWidth'), scale: 0.45 });
+            modTargets.set(node.id + ':wavetablePos', { param: cw.parameters.get('wavetablePos'), scale: 0.55 });
+            modTargets.set(node.id + ':formantVowel', { param: cw.parameters.get('formantVowel'), scale: 2.0 });
+            modTargets.set(node.id + ':formantShift', { param: cw.parameters.get('formantShift'), scale: 8.0 });
+            modTargets.set(node.id + ':noiseCutoff', { param: cw.parameters.get('noiseCutoff'), scale: 1.5 });
+            modTargets.set(node.id + ':noiseQ', { param: cw.parameters.get('noiseQ'), scale: 12.0 });
+            altFmOk = true;
+          } catch { altFmOk = false; }
+        }
+        if (!altFmOk) {
+          const c = track(ctx.createOscillator());
+          c.type = safeOscType(cwf, 'sine'); c.frequency.value = cf;
+          mg.connect(c.frequency); nFm.connect(c.frequency); modAudioIn.connect(c.frequency);
+          c.connect(g); c.start(now); m.start(now); nSrc.start(now); stops.push(() => { c.stop(); m.stop(); nSrc.stop(); });
+          cvTarget.set(node.id + ':pitch', { param: c.detune, scale: 1200 });
+          modTargets.set(node.id + ':pitch', { param: c.detune, scale: 1200 });
+        }
         audioIn.set(node.id + ':modIn', modAudioIn);
         audioOut.set(node.id + ':out', amp);
-        cvTarget.set(node.id + ':pitch', { param: c.detune, scale: 1200 });
         cvTarget.set(node.id + ':index', { param: mg.gain, scale: 700 });
         cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
-        modTargets.set(node.id + ':pitch', { param: c.detune, scale: 1200 });
         modTargets.set(node.id + ':modIndex', { param: mg.gain, scale: 700 });
         modTargets.set(node.id + ':noiseFmDepth', { param: nFm.gain, scale: 550 });
         modTargets.set(node.id + ':noiseBandwidth', { param: nBp.detune, scale: 2400 });

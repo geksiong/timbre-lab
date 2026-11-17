@@ -21,6 +21,12 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
   oscillator: [
     { key: 'pitch', label: 'Pitch' },
     { key: 'detune', label: 'Fine Detune' },
+    { key: 'pulseWidth', label: 'Pulse Width (PWM)' },
+    { key: 'wavetablePos', label: 'Wavetable Morph Pos' },
+    { key: 'formantVowel', label: 'Vocal Formant Vowel' },
+    { key: 'formantShift', label: 'Vocal Formant Shift' },
+    { key: 'noiseCutoff', label: 'Noise Filter Pitch' },
+    { key: 'noiseQ', label: 'Noise Resonance Q' },
     { key: 'gain', label: 'Output Level' },
   ],
   fmOperator: [
@@ -28,6 +34,12 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'modIndex', label: 'FM Depth' },
     { key: 'noiseFmDepth', label: 'Noise FM Depth' },
     { key: 'noiseBandwidth', label: 'Noise FM Tone' },
+    { key: 'pulseWidth', label: 'Pulse Width (PWM)' },
+    { key: 'wavetablePos', label: 'Wavetable Morph Pos' },
+    { key: 'formantVowel', label: 'Vocal Formant Vowel' },
+    { key: 'formantShift', label: 'Vocal Formant Shift' },
+    { key: 'noiseCutoff', label: 'Noise Filter Pitch' },
+    { key: 'noiseQ', label: 'Noise Resonance Q' },
     { key: 'gain', label: 'Output Level' },
   ],
   physicalString: [

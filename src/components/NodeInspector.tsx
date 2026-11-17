@@ -1,6 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Trash2, Power, Copy, Unlink, HelpCircle, ChevronDown, ChevronUp, PanelRightClose } from 'lucide-react';
 import { MODULE_REGISTRY } from '../engine/moduleRegistry';
+import {
+  HARMONIC_PRESETS,
+  computeCarrierPreviewSamples,
+  getFormantVowelName,
+  parseHarmonicsString,
+  serializeHarmonics,
+} from '../engine/carrierWaves';
 import { SynthConnection, SynthNode, SynthPatch } from '../engine/types';
 import { PrecisionSlider } from './PrecisionSlider';
 
@@ -31,6 +38,7 @@ const CV_TARGET_PORTS = new Set([
   'depth',
   'density',
   'mix',
+  'shape',
 ]);
 
 function biquadDbAtFreq(
@@ -142,6 +150,157 @@ const EqResponseCurve: React.FC<{ params: Record<string, number | string | boole
         <line x1="180" y1="0" x2="180" y2="84" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
         <path d={pathData} fill="none" className="stroke-amber-600 dark:stroke-amber-500" strokeWidth="2" strokeLinecap="round" />
       </svg>
+    </div>
+  );
+};
+
+const CarrierWaveformPreview: React.FC<{
+  waveform: string;
+  params: Record<string, number | string | boolean>;
+}> = ({ waveform, params }) => {
+  const { pathData, badgeText } = useMemo(() => {
+    const samples = computeCarrierPreviewSamples(waveform, params, 128);
+    const w = 240;
+    const h = 68;
+    const mid = h / 2;
+    const pts: string[] = [];
+    for (let i = 0; i < samples.length; i++) {
+      const x = (i / (samples.length - 1)) * w;
+      const y = mid - samples[i] * (mid - 6);
+      pts.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`);
+    }
+
+    let badge = waveform;
+    if (waveform === 'pulse') {
+      badge = `${Math.round(Number(params.pulseWidth ?? 0.35) * 100)}% duty`;
+    } else if (waveform === 'wavetable') {
+      badge = `${String(params.wavetableBank ?? 'analog')} · ${Math.round(Number(params.wavetablePos ?? 0.25) * 100)}%`;
+    } else if (waveform === 'vocalFormant') {
+      const shift = Number(params.formantShift ?? 0);
+      badge = `Vowel ${getFormantVowelName(Number(params.formantVowel ?? 0))}${shift !== 0 ? ` (${shift > 0 ? '+' : ''}${shift}st)` : ''}`;
+    } else if (waveform === 'filteredNoise') {
+      badge = `${Number(params.noiseCutoff ?? 1).toFixed(2)}x · Q ${Number(params.noiseQ ?? 8).toFixed(1)}`;
+    } else if (waveform === 'customHarmonics') {
+      badge = '16-partial additive';
+    }
+
+    return { pathData: pts.join(' '), badgeText: badge };
+  }, [waveform, params]);
+
+  return (
+    <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 space-y-1.5">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="font-medium text-slate-700 dark:text-slate-300">Carrier Cycle Preview</span>
+        <span className="font-mono tabular-nums text-amber-700 dark:text-amber-400 truncate">
+          {badgeText}
+        </span>
+      </div>
+      <svg viewBox="0 0 240 68" className="w-full h-[68px] overflow-visible">
+        <line x1="0" y1="34" x2="240" y2="34" className="stroke-slate-300 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
+        <line x1="120" y1="0" x2="120" y2="68" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
+        <path d={pathData} fill="none" className="stroke-amber-600 dark:stroke-amber-400" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
+  );
+};
+
+const CustomHarmonicsEditor: React.FC<{
+  rawValue: unknown;
+  onChange: (serialized: string) => void;
+}> = ({ rawValue, onChange }) => {
+  const harmonics = useMemo(() => parseHarmonicsString(rawValue), [rawValue]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+
+  const updateFromPointer = (clientX: number, clientY: number) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const relX = Math.max(0, Math.min(0.9999, (clientX - rect.left) / Math.max(1, rect.width)));
+    const idx = Math.floor(relX * 16);
+    const relY = 1 - (clientY - rect.top) / Math.max(1, rect.height);
+    const level = Math.max(0, Math.min(1, Math.round(relY * 20) / 20));
+    const next = [...harmonics];
+    next[idx] = level;
+    if (next.every((v) => v < 0.01)) {
+      next[0] = 0.05;
+    }
+    onChange(serializeHarmonics(next));
+  };
+
+  const activeCount = harmonics.filter((v) => v >= 0.02).length;
+
+  return (
+    <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 space-y-2.5">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="font-medium text-slate-700 dark:text-slate-300">
+          Harmonic Partials (H1–H16)
+        </span>
+        <span className="font-mono tabular-nums text-slate-500">
+          {activeCount}/16 active
+        </span>
+      </div>
+
+      <div
+        ref={containerRef}
+        role="group"
+        aria-label="Custom 16-harmonic partial bar editor"
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          draggingRef.current = true;
+          updateFromPointer(e.clientX, e.clientY);
+        }}
+        onPointerMove={(e) => {
+          if (!draggingRef.current) return;
+          updateFromPointer(e.clientX, e.clientY);
+        }}
+        onPointerUp={() => {
+          draggingRef.current = false;
+        }}
+        onPointerCancel={() => {
+          draggingRef.current = false;
+        }}
+        className="h-24 w-full grid grid-cols-16 gap-1 items-end p-1.5 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#111622] cursor-crosshair select-none touch-none"
+      >
+        {harmonics.map((amp, i) => {
+          const pct = Math.max(4, Math.round(amp * 100));
+          return (
+            <div key={i} className="h-full flex flex-col justify-end items-center group" title={`H${i + 1}: ${Math.round(amp * 100)}%`}>
+              <div
+                className={`w-full rounded-t-sm transition-colors ${
+                  amp >= 0.02
+                    ? i === 0
+                      ? 'bg-amber-600 dark:bg-amber-400'
+                      : 'bg-amber-500/80 dark:bg-amber-500/75 group-hover:bg-amber-600 dark:group-hover:bg-amber-400'
+                    : 'bg-slate-200 dark:bg-slate-800'
+                }`}
+                style={{ height: `${pct}%` }}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-slate-500 px-0.5">
+        <span>H1</span>
+        <span>H4</span>
+        <span>H8</span>
+        <span>H12</span>
+        <span>H16</span>
+      </div>
+
+      <div className="flex flex-wrap gap-1 pt-0.5">
+        {HARMONIC_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => onChange(serializeHarmonics(preset.values))}
+            className="px-2 py-1 text-[11px] font-medium rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#111622] text-slate-700 dark:text-slate-300 hover:border-amber-500/60 hover:text-amber-700 dark:hover:text-amber-300 transition-colors whitespace-nowrap shrink-0"
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 };
@@ -275,8 +434,34 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
               <EqResponseCurve params={selectedNode.params} />
             )}
 
+            {/* Live Carrier Waveform Preview for Oscillator & FM Operator */}
+            {(selectedNode.type === 'oscillator' || selectedNode.type === 'fmOperator') && (
+              <CarrierWaveformPreview
+                waveform={String(
+                  selectedNode.type === 'oscillator'
+                    ? selectedNode.params.waveform ?? 'sawtooth'
+                    : selectedNode.params.carrierWave ?? 'sine'
+                )}
+                params={selectedNode.params}
+              />
+            )}
+
+            {/* Custom 16-Partial Harmonic Editor */}
+            {((selectedNode.type === 'oscillator' &&
+              selectedNode.params.waveform === 'customHarmonics') ||
+              (selectedNode.type === 'fmOperator' &&
+                selectedNode.params.carrierWave === 'customHarmonics')) && (
+              <CustomHarmonicsEditor
+                rawValue={selectedNode.params.customHarmonics}
+                onChange={(val) => onUpdateNodeParam(selectedNode.id, 'customHarmonics', val)}
+              />
+            )}
+
             <div className="space-y-4">
               {def.params.map((param) => {
+                if (param.visibleWhen && !param.visibleWhen(selectedNode.params)) {
+                  return null;
+                }
                 const rawVal = selectedNode.params[param.key] ?? param.defaultValue;
 
                 if (param.type === 'toggle') {
@@ -347,7 +532,11 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                 return (
                   <div key={param.key} className="space-y-1">
                     <PrecisionSlider
-                      label={param.label}
+                      label={
+                        param.key === 'formantVowel'
+                          ? `${param.label} (${getFormantVowelName(numVal)})`
+                          : param.label
+                      }
                       value={numVal}
                       min={min}
                       max={max}

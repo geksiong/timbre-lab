@@ -760,7 +760,7 @@ export const GuidePage: React.FC<GuidePageProps> = ({
                   </h3>
                   <ul className="space-y-2 text-slate-600 dark:text-slate-400 leading-relaxed list-disc pl-4">
                     <li>
-                      <span className="text-amber-800 dark:text-amber-300 font-medium">Patchbay CV Cables</span> visually connect LFO or Envelope outputs directly to Pitch, Cutoff, Bow Pressure, Comb Freq/Feedback, FM Index, or Amp CV ports.
+                      <span className="text-amber-800 dark:text-amber-300 font-medium">Patchbay CV Cables</span> visually connect LFO or Envelope outputs directly to Pitch, Cutoff, Shape CV (PWM / Wavetable / Formant / Noise), Bow Pressure, Comb Freq/Feedback, FM Index, or Amp CV ports.
                     </li>
                     <li>
                       <span className="text-cyan-800 dark:text-cyan-300 font-medium">Modulation Matrix</span> adds expressive performance sources—<span className="text-slate-900 dark:text-slate-200">Note Velocity</span>, <span className="text-slate-900 dark:text-slate-200">Key Track</span>, <span className="text-slate-900 dark:text-slate-200">Mod Wheel (CC1)</span>, <span className="text-slate-900 dark:text-slate-200">Per-Note Random</span>, and <span className="text-slate-900 dark:text-slate-200">Organic Friction Noise</span>—plus targets with no cable jack (like EQ peak frequencies, Comb Resonance, or Rosin Grit).

@@ -11,6 +11,7 @@ import {
   AudioLines,
 } from 'lucide-react';
 import { MODULE_REGISTRY } from '../engine/moduleRegistry';
+import { formatCarrierSummary, isAlternativeCarrierWaveform } from '../engine/carrierWaves';
 import { ModuleType, PortSpec, SynthConnection, SynthNode, SynthPatch } from '../engine/types';
 import { PrecisionSlider } from './PrecisionSlider';
 
@@ -54,10 +55,15 @@ function getNodeSummary(node: SynthNode): string {
   switch (node.type) {
     case 'oscillator': {
       const uni = Number(p.unison ?? 1);
-      return `${String(p.waveform ?? 'saw')}${uni > 1 ? ` ${uni}x` : ''} · ${Number(p.octave ?? 0)} oct`;
+      const wf = String(p.waveform ?? 'saw');
+      const wfText = isAlternativeCarrierWaveform(wf) ? formatCarrierSummary(wf, p) : wf;
+      return `${wfText}${uni > 1 ? ` ${uni}x` : ''} · ${Number(p.octave ?? 0)} oct`;
     }
-    case 'fmOperator':
-      return `ratio ${Number(p.ratio ?? 2).toFixed(2)}x · idx ${Math.round(Number(p.modIndex ?? 260))}`;
+    case 'fmOperator': {
+      const cwf = String(p.carrierWave ?? 'sine');
+      const cPrefix = isAlternativeCarrierWaveform(cwf) ? `${formatCarrierSummary(cwf, p)} · ` : '';
+      return `${cPrefix}ratio ${Number(p.ratio ?? 2).toFixed(2)}x · idx ${Math.round(Number(p.modIndex ?? 260))}`;
+    }
     case 'physicalString':
       return `${String(p.excitation ?? 'pluck')} · damp ${Number(p.damping ?? 0.45).toFixed(2)}`;
     case 'noise':
@@ -511,7 +517,8 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
               conn.toPort === 'rate' ||
               conn.toPort === 'depth' ||
               conn.toPort === 'density' ||
-              conn.toPort === 'mix';
+              conn.toPort === 'mix' ||
+              conn.toPort === 'shape';
             const isSelected = selectedConnId === conn.id;
             const strokeColor = isSelected
               ? theme === 'light'

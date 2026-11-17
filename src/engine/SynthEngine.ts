@@ -8,6 +8,14 @@ import {
   SynthNode,
   SynthPatch,
 } from './types';
+import {
+  ALTERNATIVE_CARRIER_WORKLET_CODE,
+  WAVETABLE_BANK_INDEX,
+  computeCarrierPreviewSamples,
+  isAlternativeCarrierWaveform,
+  parseHarmonicsString,
+  resolveWorkletCarrierMode,
+} from './carrierWaves';
 
 const KARPLUS_WORKLET_CODE = `
 class KarplusStrongProcessor extends AudioWorkletProcessor {
@@ -497,6 +505,7 @@ registerProcessor('timbre-karplus-processor', KarplusStrongProcessor);
 registerProcessor('timbre-safety-limiter', SafetyLimiterProcessor);
 registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
+${ALTERNATIVE_CARRIER_WORKLET_CODE}
 `;
 
 interface ActiveVoice {
@@ -2021,76 +2030,300 @@ export class SynthEngine {
           pitchConst.connect(pitchSum);
           pitchConst.start(now);
           stopCallbacks.push(() => pitchConst.stop());
-
-          const subOscs: { osc: OscillatorNode; pan: StereoPannerNode; idx: number }[] = [];
-          const normLevel = 1 / Math.sqrt(oscCount);
-
-          for (let i = 0; i < oscCount; i++) {
-            const osc = track(ctx.createOscillator());
-            const pan = track(ctx.createStereoPanner());
-            const subGain = track(ctx.createGain());
-            subGain.gain.value = normLevel;
-            pitchSum.connect(osc.detune);
-            osc.connect(subGain);
-            subGain.connect(pan);
-            pan.connect(levelGain);
-            osc.start(now);
-            stopCallbacks.push(() => osc.stop());
-            subOscs.push({ osc, pan, idx: i });
-          }
           levelGain.connect(ampCvTarget);
 
-          const applyOsc = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
-            const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
-            const wf = String(merged.waveform ?? 'sawtooth');
-            const periodic = this.periodicWaves.get(wf);
-            const oct = clampFinite(merged.octave, -3, 3, 0);
-            const st = clampFinite(merged.semitone, -24, 24, 0);
-            const det = clampFinite(merged.detune, -100, 100, 0);
-            const uniDetune = clampFinite(merged.unisonDetune, 0, 60, 14);
-            const spread = clampFinite(merged.stereoSpread, 0, 1, 0.55);
-            const freq = clampFinite(
-              baseFreq * Math.pow(2, oct + (st + this.pitchBendSemitones) / 12),
-              15,
-              18000,
-              220
-            );
+          const initialWf = String(node.params.waveform ?? 'sawtooth');
+          const normLevel = 1 / Math.sqrt(oscCount);
+          let usedAltWorklet = false;
 
-            for (const sub of subOscs) {
-              if (periodic) {
-                sub.osc.setPeriodicWave(periodic);
-              } else {
-                sub.osc.type = safeOscType(wf, 'sawtooth');
+          if (isAlternativeCarrierWaveform(initialWf) && this.workletReady) {
+            try {
+              const shapeConst = track(ctx.createConstantSource());
+              shapeConst.offset.value = 0;
+              shapeConst.start(now);
+              stopCallbacks.push(() => shapeConst.stop());
+
+              const pwConst = track(ctx.createConstantSource());
+              pwConst.offset.value = 0;
+              pwConst.start(now);
+              stopCallbacks.push(() => pwConst.stop());
+
+              const wtConst = track(ctx.createConstantSource());
+              wtConst.offset.value = 0;
+              wtConst.start(now);
+              stopCallbacks.push(() => wtConst.stop());
+
+              const vowelConst = track(ctx.createConstantSource());
+              vowelConst.offset.value = 0;
+              vowelConst.start(now);
+              stopCallbacks.push(() => vowelConst.stop());
+
+              const shiftConst = track(ctx.createConstantSource());
+              shiftConst.offset.value = 0;
+              shiftConst.start(now);
+              stopCallbacks.push(() => shiftConst.stop());
+
+              const nCutConst = track(ctx.createConstantSource());
+              nCutConst.offset.value = 0;
+              nCutConst.start(now);
+              stopCallbacks.push(() => nCutConst.stop());
+
+              const nQConst = track(ctx.createConstantSource());
+              nQConst.offset.value = 0;
+              nQConst.start(now);
+              stopCallbacks.push(() => nQConst.stop());
+
+              const subWorklets: { worklet: AudioWorkletNode; pan: StereoPannerNode; idx: number }[] = [];
+
+              for (let i = 0; i < oscCount; i++) {
+                const worklet = track(
+                  new AudioWorkletNode(ctx, 'timbre-carrier-processor', {
+                    numberOfInputs: 0,
+                    numberOfOutputs: 1,
+                    outputChannelCount: [1],
+                  })
+                );
+                worklet.onprocessorerror = () => {
+                  this.workletReady = false;
+                };
+                const pan = track(ctx.createStereoPanner());
+                const subGain = track(ctx.createGain());
+                subGain.gain.value = normLevel;
+
+                pitchSum.connect(worklet.parameters.get('detune')!);
+                shapeConst.connect(worklet.parameters.get('shapeCv')!);
+                pwConst.connect(worklet.parameters.get('pulseWidth')!);
+                wtConst.connect(worklet.parameters.get('wavetablePos')!);
+                vowelConst.connect(worklet.parameters.get('formantVowel')!);
+                shiftConst.connect(worklet.parameters.get('formantShift')!);
+                nCutConst.connect(worklet.parameters.get('noiseCutoff')!);
+                nQConst.connect(worklet.parameters.get('noiseQ')!);
+
+                worklet.connect(subGain);
+                subGain.connect(pan);
+                pan.connect(levelGain);
+                stopCallbacks.push(() => {
+                  try {
+                    worklet.port.postMessage('stop');
+                  } catch {
+                    // ignore
+                  }
+                });
+                subWorklets.push({ worklet, pan, idx: i });
               }
-              setAudioParam(sub.osc.frequency, freq, t, 0.005, immediate);
-              const normOffset =
-                oscCount === 1 ? 0 : (sub.idx / (oscCount - 1)) * 2 - 1;
-              setAudioParam(sub.osc.detune, det + normOffset * uniDetune, t, 0.006, immediate);
-              setAudioParam(sub.pan.pan, normOffset * spread, t, 0.01, immediate);
+
+              let lastHarmonicsStr = '';
+              const applyAltOsc = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const wf = String(merged.waveform ?? 'pulse');
+                const modeIdx = resolveWorkletCarrierMode(wf);
+                const oct = clampFinite(merged.octave, -3, 3, 0);
+                const st = clampFinite(merged.semitone, -24, 24, 0);
+                const det = clampFinite(merged.detune, -100, 100, 0);
+                const uniDetune = clampFinite(merged.unisonDetune, 0, 60, 14);
+                const spread = clampFinite(merged.stereoSpread, 0, 1, 0.55);
+                const freq = clampFinite(
+                  baseFreq * Math.pow(2, oct + (st + this.pitchBendSemitones) / 12),
+                  15,
+                  18000,
+                  220
+                );
+                const pw = clampFinite(merged.pulseWidth, 0.04, 0.96, 0.35);
+                const bankIdx = WAVETABLE_BANK_INDEX[String(merged.wavetableBank ?? 'analog')] ?? 0;
+                const wtPos = clampFinite(merged.wavetablePos, 0, 1, 0.25);
+                const vowel = clampFinite(merged.formantVowel, 0, 4, 0);
+                const shift = clampFinite(merged.formantShift, -12, 12, 0);
+                const nCut = clampFinite(merged.noiseCutoff, 0.25, 4, 1);
+                const nQ = clampFinite(merged.noiseQ, 0.5, 32, 8);
+                const harmonicsStr = String(merged.customHarmonics ?? '');
+                const harmonicsDirty = harmonicsStr !== lastHarmonicsStr;
+                const parsedHarmonics = harmonicsDirty ? parseHarmonicsString(harmonicsStr) : null;
+                if (harmonicsDirty) lastHarmonicsStr = harmonicsStr;
+
+                for (const sub of subWorklets) {
+                  const params = sub.worklet.parameters;
+                  params.get('mode')!.setValueAtTime(modeIdx, t);
+                  params.get('wavetableBank')!.setValueAtTime(bankIdx, t);
+                  setAudioParam(params.get('frequency')!, freq, t, 0.005, immediate);
+                  const normOffset = oscCount === 1 ? 0 : (sub.idx / (oscCount - 1)) * 2 - 1;
+                  setAudioParam(params.get('detune')!, det + normOffset * uniDetune, t, 0.006, immediate);
+                  setAudioParam(params.get('pulseWidth')!, pw, t, 0.008, immediate);
+                  setAudioParam(params.get('wavetablePos')!, wtPos, t, 0.008, immediate);
+                  setAudioParam(params.get('formantVowel')!, vowel, t, 0.008, immediate);
+                  setAudioParam(params.get('formantShift')!, shift, t, 0.008, immediate);
+                  setAudioParam(params.get('noiseCutoff')!, nCut, t, 0.008, immediate);
+                  setAudioParam(params.get('noiseQ')!, nQ, t, 0.008, immediate);
+                  setAudioParam(sub.pan.pan, normOffset * spread, t, 0.01, immediate);
+                  if (parsedHarmonics) {
+                    sub.worklet.port.postMessage({ type: 'harmonics', values: parsedHarmonics });
+                  }
+                }
+                setAudioParam(
+                  levelGain.gain,
+                  clampFinite(merged.gain, 0, 1.5, 0.7) * velNorm,
+                  t,
+                  0.005,
+                  immediate
+                );
+              };
+
+              applyAltOsc(node.params, now, true);
+
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+              cvTargets.set(`${node.id}:shape`, { param: shapeConst.offset, baseScale: 1.0 });
+
+              modParamTargets.set(`${node.id}:detune`, { param: pitchConst.offset, baseScale: 100 });
+              modParamTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+              modParamTargets.set(`${node.id}:pulseWidth`, { param: pwConst.offset, baseScale: 0.45 });
+              modParamTargets.set(`${node.id}:wavetablePos`, { param: wtConst.offset, baseScale: 0.55 });
+              modParamTargets.set(`${node.id}:formantVowel`, { param: vowelConst.offset, baseScale: 2.0 });
+              modParamTargets.set(`${node.id}:formantShift`, { param: shiftConst.offset, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:noiseCutoff`, { param: nCutConst.offset, baseScale: 1.5 });
+              modParamTargets.set(`${node.id}:noiseQ`, { param: nQConst.offset, baseScale: 12.0 });
+
+              nodeControllers.set(node.id, {
+                type: 'oscillator',
+                updateParams: applyAltOsc,
+                setPitchBend: (_semi, t) => applyAltOsc({}, t),
+              });
+              usedAltWorklet = true;
+            } catch {
+              this.workletReady = false;
             }
-            setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.7) * velNorm, t, 0.005, immediate);
-          };
+          }
 
-          applyOsc(node.params, now, true);
+          if (!usedAltWorklet) {
+            if (initialWf === 'filteredNoise') {
+              const noiseSrc = track(ctx.createBufferSource());
+              noiseSrc.buffer = this.noiseBufferWhite;
+              noiseSrc.loop = true;
+              const bp = track(ctx.createBiquadFilter());
+              bp.type = 'bandpass';
+              const shapeConst = track(ctx.createConstantSource());
+              shapeConst.offset.value = 0;
+              shapeConst.start(now);
+              stopCallbacks.push(() => shapeConst.stop());
+              pitchSum.connect(bp.detune);
+              shapeConst.connect(bp.detune);
+              noiseSrc.connect(bp);
+              bp.connect(levelGain);
+              noiseSrc.start(now);
+              stopCallbacks.push(() => noiseSrc.stop());
 
-          audioOutputs.set(`${node.id}:out`, ampCvTarget);
-          cvTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
-          cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+              const applyNoiseFallback = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const oct = clampFinite(merged.octave, -3, 3, 0);
+                const st = clampFinite(merged.semitone, -24, 24, 0);
+                const nCut = clampFinite(merged.noiseCutoff, 0.25, 4, 1);
+                const nQ = clampFinite(merged.noiseQ, 0.5, 32, 8);
+                const freq = clampFinite(
+                  baseFreq * Math.pow(2, oct + (st + this.pitchBendSemitones) / 12) * nCut,
+                  30,
+                  Math.min(16000, ctx.sampleRate * 0.42),
+                  440
+                );
+                setAudioParam(bp.frequency, freq, t, 0.008, immediate);
+                setAudioParam(bp.Q, nQ, t, 0.01, immediate);
+                setAudioParam(
+                  levelGain.gain,
+                  clampFinite(merged.gain, 0, 1.5, 0.7) * velNorm * 0.85,
+                  t,
+                  0.005,
+                  immediate
+                );
+              };
+              applyNoiseFallback(node.params, now, true);
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+              cvTargets.set(`${node.id}:shape`, { param: shapeConst.offset, baseScale: 1800 });
+              modParamTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:noiseCutoff`, { param: shapeConst.offset, baseScale: 1800 });
+              modParamTargets.set(`${node.id}:noiseQ`, { param: bp.Q, baseScale: 10 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+              nodeControllers.set(node.id, {
+                type: 'oscillator',
+                updateParams: applyNoiseFallback,
+                setPitchBend: (_semi, t) => applyNoiseFallback({}, t),
+              });
+            } else {
+              const subOscs: { osc: OscillatorNode; pan: StereoPannerNode; idx: number }[] = [];
+              for (let i = 0; i < oscCount; i++) {
+                const osc = track(ctx.createOscillator());
+                const pan = track(ctx.createStereoPanner());
+                const subGain = track(ctx.createGain());
+                subGain.gain.value = normLevel;
+                pitchSum.connect(osc.detune);
+                osc.connect(subGain);
+                subGain.connect(pan);
+                pan.connect(levelGain);
+                osc.start(now);
+                stopCallbacks.push(() => osc.stop());
+                subOscs.push({ osc, pan, idx: i });
+              }
 
-          modParamTargets.set(`${node.id}:detune`, { param: pitchConst.offset, baseScale: 100 });
-          modParamTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
-          modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+              const applyOsc = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const wf = String(merged.waveform ?? 'sawtooth');
+                const periodic = this.buildFallbackPeriodicWave(ctx, wf, merged);
+                const oct = clampFinite(merged.octave, -3, 3, 0);
+                const st = clampFinite(merged.semitone, -24, 24, 0);
+                const det = clampFinite(merged.detune, -100, 100, 0);
+                const uniDetune = clampFinite(merged.unisonDetune, 0, 60, 14);
+                const spread = clampFinite(merged.stereoSpread, 0, 1, 0.55);
+                const freq = clampFinite(
+                  baseFreq * Math.pow(2, oct + (st + this.pitchBendSemitones) / 12),
+                  15,
+                  18000,
+                  220
+                );
 
-          nodeControllers.set(node.id, {
-            type: 'oscillator',
-            updateParams: applyOsc,
-            setPitchBend: (_semi, t) => applyOsc({}, t),
-          });
+                for (const sub of subOscs) {
+                  if (periodic) {
+                    sub.osc.setPeriodicWave(periodic);
+                  } else {
+                    sub.osc.type = safeOscType(wf, 'sawtooth');
+                  }
+                  setAudioParam(sub.osc.frequency, freq, t, 0.005, immediate);
+                  const normOffset = oscCount === 1 ? 0 : (sub.idx / (oscCount - 1)) * 2 - 1;
+                  setAudioParam(sub.osc.detune, det + normOffset * uniDetune, t, 0.006, immediate);
+                  setAudioParam(sub.pan.pan, normOffset * spread, t, 0.01, immediate);
+                }
+                setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.7) * velNorm, t, 0.005, immediate);
+              };
+
+              applyOsc(node.params, now, true);
+
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+
+              modParamTargets.set(`${node.id}:detune`, { param: pitchConst.offset, baseScale: 100 });
+              modParamTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+
+              nodeControllers.set(node.id, {
+                type: 'oscillator',
+                updateParams: applyOsc,
+                setPitchBend: (_semi, t) => applyOsc({}, t),
+              });
+            }
+          }
           break;
         }
 
         case 'fmOperator': {
-          const carrier = track(ctx.createOscillator());
           const mod = track(ctx.createOscillator());
           const modHarmonic = track(ctx.createOscillator());
           const modGain = track(ctx.createGain());
@@ -2112,75 +2345,228 @@ export class SynthEngine {
           const levelGain = track(ctx.createGain());
           const ampCvTarget = track(ctx.createGain());
           ampCvTarget.gain.value = 1;
+          levelGain.connect(ampCvTarget);
 
           mod.connect(modGain);
           modHarmonic.connect(fbGain);
           fbGain.connect(modGain);
-          modGain.connect(carrier.frequency);
-
           noiseSrc.connect(noiseBp);
           noiseBp.connect(noiseFmGain);
-          noiseFmGain.connect(carrier.frequency);
 
-          modAudioIn.connect(carrier.frequency);
+          const initialCarrierWf = String(node.params.carrierWave ?? 'sine');
+          let usedAltCarrier = false;
 
-          carrier.connect(levelGain);
-          levelGain.connect(ampCvTarget);
+          if (isAlternativeCarrierWaveform(initialCarrierWf) && this.workletReady) {
+            try {
+              const carrierWorklet = track(
+                new AudioWorkletNode(ctx, 'timbre-carrier-processor', {
+                  numberOfInputs: 0,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              carrierWorklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
 
-          const applyFm = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
-            const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
-            carrier.type = safeOscType(merged.carrierWave, 'sine');
-            mod.type = safeOscType(merged.modWave, 'sine');
-            modHarmonic.type = 'sine';
+              const cFreqParam = carrierWorklet.parameters.get('frequency')!;
+              const cDetuneParam = carrierWorklet.parameters.get('detune')!;
+              const cModeParam = carrierWorklet.parameters.get('mode')!;
+              const cPwParam = carrierWorklet.parameters.get('pulseWidth')!;
+              const cBankParam = carrierWorklet.parameters.get('wavetableBank')!;
+              const cWtPosParam = carrierWorklet.parameters.get('wavetablePos')!;
+              const cVowelParam = carrierWorklet.parameters.get('formantVowel')!;
+              const cShiftParam = carrierWorklet.parameters.get('formantShift')!;
+              const cNoiseCutParam = carrierWorklet.parameters.get('noiseCutoff')!;
+              const cNoiseQParam = carrierWorklet.parameters.get('noiseQ')!;
+              const cShapeCvParam = carrierWorklet.parameters.get('shapeCv')!;
 
-            const oct = clampFinite(merged.octave, -3, 3, 0);
-            const ratio = clampFinite(merged.ratio, 0.25, 16, 2.0);
-            const modIndex = clampFinite(merged.modIndex, 0, 2000, 260);
-            const feedback = clampFinite(merged.feedback, 0, 0.95, 0.12);
-            const noiseDepth = clampFinite(merged.noiseFmDepth, 0, 1200, 0);
-            const maxBp = Math.min(10000, ctx.sampleRate * 0.36);
-            const noiseBw = clampFinite(merged.noiseBandwidth, 200, maxBp, 2400);
-            const cFreq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 15, 16000, 220);
+              modGain.connect(cFreqParam);
+              noiseFmGain.connect(cFreqParam);
+              modAudioIn.connect(cFreqParam);
+              carrierWorklet.connect(levelGain);
 
-            setAudioParam(carrier.frequency, cFreq, t, 0.005, immediate);
-            setAudioParam(mod.frequency, clampFinite(cFreq * ratio, 10, 20000, 440), t, 0.005, immediate);
-            setAudioParam(modHarmonic.frequency, clampFinite(cFreq * ratio * 2, 10, 20000, 880), t, 0.005, immediate);
-            setAudioParam(modGain.gain, modIndex * (0.4 + velNorm * 0.6), t, 0.006, immediate);
-            setAudioParam(fbGain.gain, modIndex * feedback * 0.65, t, 0.006, immediate);
-            setAudioParam(noiseBp.frequency, noiseBw, t, 0.01, immediate);
-            setAudioParam(noiseFmGain.gain, noiseDepth * (0.45 + velNorm * 0.55), t, 0.008, immediate);
-            setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.75) * velNorm, t, 0.005, immediate);
-          };
+              let lastHarmonicsStr = '';
+              const applyAltFm = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const wf = String(merged.carrierWave ?? 'pulse');
+                cModeParam.setValueAtTime(resolveWorkletCarrierMode(wf), t);
+                cBankParam.setValueAtTime(
+                  WAVETABLE_BANK_INDEX[String(merged.wavetableBank ?? 'analog')] ?? 0,
+                  t
+                );
+                mod.type = safeOscType(merged.modWave, 'sine');
+                modHarmonic.type = 'sine';
 
-          applyFm(node.params, now, true);
-          carrier.start(now);
-          mod.start(now);
-          modHarmonic.start(now);
-          noiseSrc.start(now);
-          stopCallbacks.push(() => {
-            carrier.stop();
-            mod.stop();
-            modHarmonic.stop();
-            noiseSrc.stop();
-          });
+                const oct = clampFinite(merged.octave, -3, 3, 0);
+                const ratio = clampFinite(merged.ratio, 0.25, 16, 2.0);
+                const modIndex = clampFinite(merged.modIndex, 0, 2000, 260);
+                const feedback = clampFinite(merged.feedback, 0, 0.95, 0.12);
+                const noiseDepth = clampFinite(merged.noiseFmDepth, 0, 1200, 0);
+                const maxBp = Math.min(10000, ctx.sampleRate * 0.36);
+                const noiseBw = clampFinite(merged.noiseBandwidth, 200, maxBp, 2400);
+                const cFreq = clampFinite(
+                  baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12),
+                  15,
+                  16000,
+                  220
+                );
 
-          audioInputs.set(`${node.id}:modIn`, modAudioIn);
-          audioOutputs.set(`${node.id}:out`, ampCvTarget);
-          cvTargets.set(`${node.id}:pitch`, { param: carrier.detune, baseScale: 1200 });
-          cvTargets.set(`${node.id}:index`, { param: modGain.gain, baseScale: 700 });
-          cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+                setAudioParam(cFreqParam, cFreq, t, 0.005, immediate);
+                setAudioParam(cPwParam, clampFinite(merged.pulseWidth, 0.04, 0.96, 0.35), t, 0.008, immediate);
+                setAudioParam(cWtPosParam, clampFinite(merged.wavetablePos, 0, 1, 0.25), t, 0.008, immediate);
+                setAudioParam(cVowelParam, clampFinite(merged.formantVowel, 0, 4, 0), t, 0.008, immediate);
+                setAudioParam(cShiftParam, clampFinite(merged.formantShift, -12, 12, 0), t, 0.008, immediate);
+                setAudioParam(cNoiseCutParam, clampFinite(merged.noiseCutoff, 0.25, 4, 1), t, 0.008, immediate);
+                setAudioParam(cNoiseQParam, clampFinite(merged.noiseQ, 0.5, 32, 8), t, 0.008, immediate);
 
-          modParamTargets.set(`${node.id}:pitch`, { param: carrier.detune, baseScale: 1200 });
-          modParamTargets.set(`${node.id}:modIndex`, { param: modGain.gain, baseScale: 700 });
-          modParamTargets.set(`${node.id}:noiseFmDepth`, { param: noiseFmGain.gain, baseScale: 550 });
-          modParamTargets.set(`${node.id}:noiseBandwidth`, { param: noiseBp.detune, baseScale: 1500 });
-          modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+                const harmonicsStr = String(merged.customHarmonics ?? '');
+                if (harmonicsStr !== lastHarmonicsStr) {
+                  lastHarmonicsStr = harmonicsStr;
+                  carrierWorklet.port.postMessage({
+                    type: 'harmonics',
+                    values: parseHarmonicsString(harmonicsStr),
+                  });
+                }
 
-          nodeControllers.set(node.id, {
-            type: 'fmOperator',
-            updateParams: applyFm,
-            setPitchBend: (_semi, t) => applyFm({}, t),
-          });
+                setAudioParam(mod.frequency, clampFinite(cFreq * ratio, 10, 20000, 440), t, 0.005, immediate);
+                setAudioParam(
+                  modHarmonic.frequency,
+                  clampFinite(cFreq * ratio * 2, 10, 20000, 880),
+                  t,
+                  0.005,
+                  immediate
+                );
+                setAudioParam(modGain.gain, modIndex * (0.4 + velNorm * 0.6), t, 0.006, immediate);
+                setAudioParam(fbGain.gain, modIndex * feedback * 0.65, t, 0.006, immediate);
+                setAudioParam(noiseBp.frequency, noiseBw, t, 0.01, immediate);
+                setAudioParam(noiseFmGain.gain, noiseDepth * (0.45 + velNorm * 0.55), t, 0.008, immediate);
+                setAudioParam(
+                  levelGain.gain,
+                  clampFinite(merged.gain, 0, 1.5, 0.75) * velNorm,
+                  t,
+                  0.005,
+                  immediate
+                );
+              };
+
+              applyAltFm(node.params, now, true);
+              mod.start(now);
+              modHarmonic.start(now);
+              noiseSrc.start(now);
+              stopCallbacks.push(() => {
+                try {
+                  carrierWorklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+                mod.stop();
+                modHarmonic.stop();
+                noiseSrc.stop();
+              });
+
+              audioInputs.set(`${node.id}:modIn`, modAudioIn);
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: cDetuneParam, baseScale: 1200 });
+              cvTargets.set(`${node.id}:index`, { param: modGain.gain, baseScale: 700 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+              cvTargets.set(`${node.id}:shape`, { param: cShapeCvParam, baseScale: 1.0 });
+
+              modParamTargets.set(`${node.id}:pitch`, { param: cDetuneParam, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:modIndex`, { param: modGain.gain, baseScale: 700 });
+              modParamTargets.set(`${node.id}:noiseFmDepth`, { param: noiseFmGain.gain, baseScale: 550 });
+              modParamTargets.set(`${node.id}:noiseBandwidth`, { param: noiseBp.detune, baseScale: 1500 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+              modParamTargets.set(`${node.id}:pulseWidth`, { param: cPwParam, baseScale: 0.45 });
+              modParamTargets.set(`${node.id}:wavetablePos`, { param: cWtPosParam, baseScale: 0.55 });
+              modParamTargets.set(`${node.id}:formantVowel`, { param: cVowelParam, baseScale: 2.0 });
+              modParamTargets.set(`${node.id}:formantShift`, { param: cShiftParam, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:noiseCutoff`, { param: cNoiseCutParam, baseScale: 1.5 });
+              modParamTargets.set(`${node.id}:noiseQ`, { param: cNoiseQParam, baseScale: 12.0 });
+
+              nodeControllers.set(node.id, {
+                type: 'fmOperator',
+                updateParams: applyAltFm,
+                setPitchBend: (_semi, t) => applyAltFm({}, t),
+              });
+              usedAltCarrier = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+
+          if (!usedAltCarrier) {
+            const carrier = track(ctx.createOscillator());
+            modGain.connect(carrier.frequency);
+            noiseFmGain.connect(carrier.frequency);
+            modAudioIn.connect(carrier.frequency);
+            carrier.connect(levelGain);
+
+            const applyFm = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const wf = String(merged.carrierWave ?? 'sine');
+              const fallbackPeriodic = this.buildFallbackPeriodicWave(ctx, wf, merged);
+              if (fallbackPeriodic) {
+                carrier.setPeriodicWave(fallbackPeriodic);
+              } else {
+                carrier.type = safeOscType(wf, 'sine');
+              }
+              mod.type = safeOscType(merged.modWave, 'sine');
+              modHarmonic.type = 'sine';
+
+              const oct = clampFinite(merged.octave, -3, 3, 0);
+              const ratio = clampFinite(merged.ratio, 0.25, 16, 2.0);
+              const modIndex = clampFinite(merged.modIndex, 0, 2000, 260);
+              const feedback = clampFinite(merged.feedback, 0, 0.95, 0.12);
+              const noiseDepth = clampFinite(merged.noiseFmDepth, 0, 1200, 0);
+              const maxBp = Math.min(10000, ctx.sampleRate * 0.36);
+              const noiseBw = clampFinite(merged.noiseBandwidth, 200, maxBp, 2400);
+              const cFreq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 15, 16000, 220);
+
+              setAudioParam(carrier.frequency, cFreq, t, 0.005, immediate);
+              setAudioParam(mod.frequency, clampFinite(cFreq * ratio, 10, 20000, 440), t, 0.005, immediate);
+              setAudioParam(modHarmonic.frequency, clampFinite(cFreq * ratio * 2, 10, 20000, 880), t, 0.005, immediate);
+              setAudioParam(modGain.gain, modIndex * (0.4 + velNorm * 0.6), t, 0.006, immediate);
+              setAudioParam(fbGain.gain, modIndex * feedback * 0.65, t, 0.006, immediate);
+              setAudioParam(noiseBp.frequency, noiseBw, t, 0.01, immediate);
+              setAudioParam(noiseFmGain.gain, noiseDepth * (0.45 + velNorm * 0.55), t, 0.008, immediate);
+              setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.75) * velNorm, t, 0.005, immediate);
+            };
+
+            applyFm(node.params, now, true);
+            carrier.start(now);
+            mod.start(now);
+            modHarmonic.start(now);
+            noiseSrc.start(now);
+            stopCallbacks.push(() => {
+              carrier.stop();
+              mod.stop();
+              modHarmonic.stop();
+              noiseSrc.stop();
+            });
+
+            audioInputs.set(`${node.id}:modIn`, modAudioIn);
+            audioOutputs.set(`${node.id}:out`, ampCvTarget);
+            cvTargets.set(`${node.id}:pitch`, { param: carrier.detune, baseScale: 1200 });
+            cvTargets.set(`${node.id}:index`, { param: modGain.gain, baseScale: 700 });
+            cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+
+            modParamTargets.set(`${node.id}:pitch`, { param: carrier.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:modIndex`, { param: modGain.gain, baseScale: 700 });
+            modParamTargets.set(`${node.id}:noiseFmDepth`, { param: noiseFmGain.gain, baseScale: 550 });
+            modParamTargets.set(`${node.id}:noiseBandwidth`, { param: noiseBp.detune, baseScale: 1500 });
+            modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.8 });
+
+            nodeControllers.set(node.id, {
+              type: 'fmOperator',
+              updateParams: applyFm,
+              setPitchBend: (_semi, t) => applyFm({}, t),
+            });
+          }
           break;
         }
 
@@ -3184,6 +3570,50 @@ export class SynthEngine {
       hollowImag[i + 1] = v;
     });
     this.periodicWaves.set('hollow', this.ctx.createPeriodicWave(hollowReal, hollowImag));
+  }
+
+  private buildFallbackPeriodicWave(
+    ctx: AudioContext,
+    wf: string,
+    params: Record<string, number | string | boolean>
+  ): PeriodicWave | null {
+    if (this.periodicWaves.has(wf)) {
+      return this.periodicWaves.get(wf)!;
+    }
+    if (wf === 'customHarmonics') {
+      const h = parseHarmonicsString(params.customHarmonics);
+      const real = new Float32Array(17);
+      const imag = new Float32Array(17);
+      for (let i = 0; i < 16; i++) imag[i + 1] = h[i];
+      return ctx.createPeriodicWave(real, imag);
+    }
+    if (wf === 'pulse') {
+      const pw = clampFinite(params.pulseWidth, 0.04, 0.96, 0.35);
+      const real = new Float32Array(25);
+      const imag = new Float32Array(25);
+      for (let k = 1; k <= 24; k++) {
+        imag[k] = (2 / (k * Math.PI)) * Math.sin(k * Math.PI * pw);
+      }
+      return ctx.createPeriodicWave(real, imag);
+    }
+    if (wf === 'vocalFormant' || wf === 'wavetable') {
+      const samples = computeCarrierPreviewSamples(wf, params, 128);
+      const real = new Float32Array(21);
+      const imag = new Float32Array(21);
+      for (let k = 1; k <= 20; k++) {
+        let re = 0;
+        let im = 0;
+        for (let n = 0; n < 128; n++) {
+          const ang = (2 * Math.PI * k * n) / 128;
+          re += samples[n] * Math.cos(ang);
+          im += samples[n] * Math.sin(ang);
+        }
+        real[k] = (2 / 128) * re;
+        imag[k] = (2 / 128) * im;
+      }
+      return ctx.createPeriodicWave(real, imag);
+    }
+    return null;
   }
 
   private getCombLoopCurve(): Float32Array<ArrayBuffer> {
