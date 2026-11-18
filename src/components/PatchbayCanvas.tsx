@@ -10,7 +10,12 @@ import {
   X,
   AudioLines,
 } from 'lucide-react';
-import { MODULE_REGISTRY } from '../engine/moduleRegistry';
+import {
+  ADDABLE_CATEGORY_ORDER,
+  MODULE_CATEGORY_META,
+  MODULE_REGISTRY,
+  isCyanModuleCategory,
+} from '../engine/moduleRegistry';
 import { formatCarrierSummary, isAlternativeCarrierWaveform } from '../engine/carrierWaves';
 import { ModuleType, PortSpec, SynthConnection, SynthNode, SynthPatch } from '../engine/types';
 import { PrecisionSlider } from './PrecisionSlider';
@@ -162,6 +167,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
   const [pan, setPan] = useState({ x: 24, y: 24 });
   const [zoom, setZoom] = useState(0.92);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [addMenuQuery, setAddMenuQuery] = useState('');
   const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
 
   // Pending tap-to-connect or drag-to-connect source port
@@ -393,7 +399,12 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
         <div className="relative">
           <button
             type="button"
-            onClick={() => setAddMenuOpen((v) => !v)}
+            onClick={() =>
+              setAddMenuOpen((v) => {
+                if (v) setAddMenuQuery('');
+                return !v;
+              })
+            }
             className="inline-flex items-center gap-1.5 h-10 px-3 text-xs font-semibold bg-white/95 dark:bg-[#111622]/95 border border-slate-300 dark:border-slate-700 hover:border-amber-500/70 text-slate-900 dark:text-slate-100 rounded-md transition-colors whitespace-nowrap shadow-xs dark:shadow-none"
           >
             <Plus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
@@ -401,32 +412,74 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
           </button>
 
           {addMenuOpen && (
-            <div className="absolute top-11 left-0 w-56 max-h-[70vh] overflow-y-auto bg-white dark:bg-[#111622] border border-slate-300 dark:border-slate-700 rounded-lg p-1.5 z-30 shadow-xl">
-              {moduleChoices.map((type) => {
-                const def = MODULE_REGISTRY[type];
-                const isMod = def.category === 'modulator' || def.category === 'processor';
-                return (
-                  <button
-                    key={type}
-                    type="button"
-                    onClick={() => {
-                      const cx = (-pan.x + 280) / zoom;
-                      const cy = (-pan.y + 160) / zoom;
-                      onAddNode(type, {
-                        x: Math.round((cx + (patch.nodes.length % 4) * 32) / 8) * 8,
-                        y: Math.round((cy + (patch.nodes.length % 3) * 32) / 8) * 8,
-                      });
-                      setAddMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 rounded text-xs hover:bg-slate-100 dark:hover:bg-slate-800/80 flex items-center justify-between gap-2 transition-colors min-h-[38px]"
-                  >
-                    <span className="text-slate-900 dark:text-slate-100 font-medium">{def.label}</span>
-                    <span className={`font-mono text-[10px] ${isMod ? 'text-cyan-700 dark:text-cyan-400' : 'text-amber-700 dark:text-amber-400'}`}>
-                      {def.category}
-                    </span>
-                  </button>
-                );
-              })}
+            <div className="absolute top-11 left-0 w-64 max-h-[72vh] flex flex-col bg-white dark:bg-[#111622] border border-slate-300 dark:border-slate-700 rounded-lg z-30 shadow-xl overflow-hidden">
+              <div className="p-2 border-b border-slate-200 dark:border-slate-800 shrink-0">
+                <input
+                  type="text"
+                  value={addMenuQuery}
+                  onChange={(e) => setAddMenuQuery(e.target.value)}
+                  placeholder="Filter modules..."
+                  autoFocus
+                  className="w-full h-8 px-2.5 text-xs bg-slate-50 dark:bg-[#0B0F17] border border-slate-300 dark:border-slate-700 rounded text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              <div className="overflow-y-auto p-1.5 space-y-2">
+                {ADDABLE_CATEGORY_ORDER.map((cat) => {
+                  const meta = MODULE_CATEGORY_META[cat];
+                  const q = addMenuQuery.trim().toLowerCase();
+                  const items = moduleChoices.filter((type) => {
+                    const def = MODULE_REGISTRY[type];
+                    if (def.category !== cat) return false;
+                    if (!q) return true;
+                    return (
+                      def.label.toLowerCase().includes(q) ||
+                      def.description.toLowerCase().includes(q) ||
+                      meta.label.toLowerCase().includes(q)
+                    );
+                  });
+                  if (items.length === 0) return null;
+                  const isCyan = meta.accent === 'cyan';
+                  return (
+                    <div key={cat} className="space-y-0.5">
+                      <div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                        <span>{meta.label}</span>
+                        <span className={isCyan ? 'text-cyan-700 dark:text-cyan-400' : 'text-amber-700 dark:text-amber-400'}>
+                          {items.length}
+                        </span>
+                      </div>
+                      {items.map((type) => {
+                        const def = MODULE_REGISTRY[type];
+                        return (
+                          <button
+                            key={type}
+                            type="button"
+                            onClick={() => {
+                              const cx = (-pan.x + 280) / zoom;
+                              const cy = (-pan.y + 160) / zoom;
+                              onAddNode(type, {
+                                x: Math.round((cx + (patch.nodes.length % 4) * 32) / 8) * 8,
+                                y: Math.round((cy + (patch.nodes.length % 3) * 32) / 8) * 8,
+                              });
+                              setAddMenuOpen(false);
+                              setAddMenuQuery('');
+                            }}
+                            className="w-full text-left px-2.5 py-1.5 rounded text-xs hover:bg-slate-100 dark:hover:bg-slate-800/80 flex items-center justify-between gap-2 transition-colors min-h-[34px]"
+                          >
+                            <span className="text-slate-900 dark:text-slate-100 font-medium truncate">
+                              {def.label}
+                            </span>
+                            <span
+                              className={`w-1.5 h-1.5 rounded-xs shrink-0 ${
+                                isCyan ? 'bg-cyan-600 dark:bg-cyan-400' : 'bg-amber-600 dark:bg-amber-400'
+                              }`}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -634,7 +687,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
           const inPorts = def.ports.filter((p) => p.direction === 'in');
           const outPorts = def.ports.filter((p) => p.direction === 'out');
           const portRows = Math.max(inPorts.length, outPorts.length);
-          const isModOrProc = def.category === 'modulator' || def.category === 'processor';
+          const isModOrProc = isCyanModuleCategory(def.category);
 
           return (
             <div

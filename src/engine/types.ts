@@ -61,10 +61,19 @@ export interface ParamSpec {
   visibleWhen?: (params: Record<string, number | string | boolean>) => boolean;
 }
 
+export type ModuleCategory =
+  | 'source'
+  | 'filter'
+  | 'shaper'
+  | 'modulator'
+  | 'fx'
+  | 'utility'
+  | 'io';
+
 export interface ModuleDefinition {
   type: ModuleType;
   label: string;
-  category: 'source' | 'processor' | 'modulator' | 'fx' | 'io';
+  category: ModuleCategory;
   description: string;
   /** Plain-English explanation of what this DSP module does acoustically */
   acousticGuide?: string;

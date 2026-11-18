@@ -1,5 +1,31 @@
-import { ModuleDefinition, ModuleType, SynthNode } from './types';
+import { ModuleCategory, ModuleDefinition, ModuleType, SynthNode } from './types';
 import { DEFAULT_CUSTOM_HARMONICS, WAVETABLE_BANKS } from './carrierWaves';
+
+export const MODULE_CATEGORY_META: Record<
+  ModuleCategory,
+  { label: string; shortLabel: string; accent: 'amber' | 'cyan' }
+> = {
+  source: { label: 'Sources', shortLabel: 'Source', accent: 'amber' },
+  filter: { label: 'Filters & EQ', shortLabel: 'Filter', accent: 'cyan' },
+  shaper: { label: 'Shapers & Wave', shortLabel: 'Shaper', accent: 'cyan' },
+  modulator: { label: 'Modulators', shortLabel: 'Modulator', accent: 'cyan' },
+  fx: { label: 'Effects', shortLabel: 'FX', accent: 'amber' },
+  utility: { label: 'Utilities', shortLabel: 'Utility', accent: 'cyan' },
+  io: { label: 'Master I/O', shortLabel: 'Output', accent: 'amber' },
+};
+
+export const ADDABLE_CATEGORY_ORDER: ModuleCategory[] = [
+  'source',
+  'filter',
+  'shaper',
+  'modulator',
+  'fx',
+  'utility',
+];
+
+export function isCyanModuleCategory(category: ModuleCategory): boolean {
+  return MODULE_CATEGORY_META[category]?.accent === 'cyan';
+}
 
 export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   oscillator: {
@@ -500,7 +526,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   combFilter: {
     type: 'combFilter',
     label: 'Comb Filter',
-    category: 'processor',
+    category: 'filter',
     description: 'Tuned delay-line comb filter modeling bow contact point notches and wooden air resonances.',
     acousticGuide:
       'Mixes a tiny delayed copy of the sound back onto itself, creating evenly spaced peaks and notches like the teeth of a comb—essential for acoustic chamber and string physics.',
@@ -592,7 +618,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   filter: {
     type: 'filter',
     label: 'Multimode Filter',
-    category: 'processor',
+    category: 'filter',
     description: 'Resonant filter & acoustic body formant shaper with cutoff CV input.',
     acousticGuide:
       'Shapes brightness by cutting harsh highs (Lowpass) or focusing on a vocal resonance band (Bandpass / Formant Peak).',
@@ -626,7 +652,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   parametricEq: {
     type: 'parametricEq',
     label: 'Parametric EQ',
-    category: 'processor',
+    category: 'filter',
     description: '4-band precision acoustic equalizer for sculpting fixed wooden soundbox formants and air brilliance.',
     acousticGuide:
       'Unlike pitch-tracking filters, a real wooden instrument body has fixed resonant peaks (formants) that stay at the same frequencies no matter which note you play.',
@@ -654,7 +680,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   shaper: {
     type: 'shaper',
     label: 'Warmth / Shaper',
-    category: 'processor',
+    category: 'shaper',
     description: 'Asymmetric harmonic saturation and acoustic wood-body warmth.',
     acousticGuide:
       'Gently rounds off sharp wave peaks to add warm even-order harmonics, similar to wooden soundboard saturation.',
@@ -673,7 +699,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   formantFilter: {
     type: 'formantFilter',
     label: 'Vowel Formant Filter',
-    category: 'processor',
+    category: 'filter',
     description: 'Parallel 3-band resonant vocal tract filter bank that morphs continuously across Ah, Eh, Ee, Oh, and Oo.',
     acousticGuide:
       'Sculpts any incoming audio—including sawtooth waves, physical strings, or noise—through three singing throat/mouth resonance bands.',
@@ -696,7 +722,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   wavefolder: {
     type: 'wavefolder',
     label: 'Wavefolder',
-    category: 'processor',
+    category: 'shaper',
     description: '2x-oversampled West-Coast multi-stage wavefolder with symmetry bias and Fold CV.',
     acousticGuide:
       'Instead of clipping peaks flat like distortion, a wavefolder bends waveform peaks back inward—turning simple sine or triangle waves into rich, brassy, or metallic harmonics.',
@@ -730,7 +756,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   ringMod: {
     type: 'ringMod',
     label: 'Ring / AM Modulator',
-    category: 'processor',
+    category: 'shaper',
     description: 'Bipolar Ring, Amplitude, and Rectified audio-rate multiplier with key-tracked internal oscillator or external Mod Audio In.',
     acousticGuide:
       'Multiplies two waveforms together to produce sum-and-difference sidebands—ideal for church bells, gamelan gongs, metallic percussion, and vintage sci-fi.',
@@ -821,7 +847,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   bitcrusher: {
     type: 'bitcrusher',
     label: 'Bitcrusher / Lo-Fi',
-    category: 'processor',
+    category: 'shaper',
     description: 'Real-time bit-depth quantizer and sample-rate reducer with dither and post-aliasing tone filter.',
     acousticGuide:
       'Reduces digital resolution and sample-hold rate to recreate crunchy vintage 8-bit/12-bit samplers, chiptune textures, or delicate lo-fi grit.',
@@ -842,7 +868,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   crossfader: {
     type: 'crossfader',
     label: 'Audio Crossfader',
-    category: 'processor',
+    category: 'utility',
     description: '2-channel equal-power / linear stereo crossfader and mixer with CV-modulatable A↔B morphing.',
     acousticGuide:
       'Smoothly blends or morphs between two audio sources—for example, fading from Breath/Noise onset into a sustained Physical String, or sweeping between two oscillators.',
@@ -876,7 +902,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   chorus: {
     type: 'chorus',
     label: 'Stereo Ensemble',
-    category: 'processor',
+    category: 'fx',
     description: 'Multi-tap BBD-style stereo chorus and string ensemble modulator for wide, shimmering motion.',
     acousticGuide:
       'Splits the signal across several gently drifting micro-delays panned left and right, turning dry tones into lush, breathing stereo soundscapes.',
@@ -908,7 +934,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   granularCloud: {
     type: 'granularCloud',
     label: 'Granular Cloud',
-    category: 'processor',
+    category: 'fx',
     description: 'Real-time stereo granular micro-sampler with harmonic pitch shifting, time spray, and cloud freeze.',
     acousticGuide:
       'Captures incoming sound into a circular buffer and scatters dozens of overlapping, windowed micro-grains across pitch and stereo space—creating crystalline ambient mists.',
@@ -945,7 +971,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   phaser: {
     type: 'phaser',
     label: 'Stereo Phaser / Flanger',
-    category: 'processor',
+    category: 'fx',
     description: '6-stage quadrature allpass phaser and resonant jet flanger with bipolar feedback and stereo phase offset.',
     acousticGuide:
       'Sweeps a series of phase-shifted notches (Phaser) or ultra-short comb teeth (Flanger) across the stereo image for swirling motion, metallic sheen, or lush string sweep.',
@@ -1167,7 +1193,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   quantizer: {
     type: 'quantizer',
     label: 'Scale Quantizer',
-    category: 'modulator',
+    category: 'utility',
     description: 'Snaps any stepped or sweeping CV signal to exact musical scale degrees (Major, Minor, Pentatonic, Dorian, Hijaz, Fifths).',
     acousticGuide:
       'Turns raw random voltages from Sample & Hold, LFOs, or Step Sequencers into tuned musical melodies or harmonic arpeggio intervals when wired to Pitch CV at 1.0x.',
@@ -1202,7 +1228,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
   cvUtility: {
     type: 'cvUtility',
     label: 'CV Attenuverter & Math',
-    category: 'modulator',
+    category: 'utility',
     description: 'Dual-input bipolar CV mixer, inverter, offset bias, rectifier, and slew smoother.',
     acousticGuide:
       'Scales, inverts, offsets, or combines two modulation signals—letting you turn a bipolar LFO into a positive-only sweep, invert an envelope, or blend two modulators.',

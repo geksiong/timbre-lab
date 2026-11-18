@@ -1,6 +1,10 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Trash2, Power, Copy, Unlink, HelpCircle, ChevronDown, ChevronUp, PanelRightClose } from 'lucide-react';
-import { MODULE_REGISTRY } from '../engine/moduleRegistry';
+import {
+  MODULE_CATEGORY_META,
+  MODULE_REGISTRY,
+  isCyanModuleCategory,
+} from '../engine/moduleRegistry';
 import {
   HARMONIC_PRESETS,
   computeCarrierPreviewSamples,
@@ -325,8 +329,8 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
             {selectedNode ? selectedNode.label || def?.label : 'Patch Properties'}
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            {selectedNode
-              ? `${def?.category.toUpperCase()} · ${selectedNode.type}`
+            {selectedNode && def
+              ? `${MODULE_CATEGORY_META[def.category].label.toUpperCase()} · ${selectedNode.type}`
               : `${patch.nodes.length} modules · ${patch.connections.length} cables`}
           </p>
         </div>
@@ -506,7 +510,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                 const min = param.min ?? 0;
                 const max = param.max ?? 1;
                 const step = param.step ?? 0.01;
-                const isCyan = def.category === 'modulator' || def.category === 'processor';
+                const isCyan = isCyanModuleCategory(def.category);
                 const isInt =
                   param.key === 'octave' ||
                   param.key === 'semitone' ||

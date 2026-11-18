@@ -218,10 +218,10 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
       { value: 'noise', label: 'Organic Friction Noise' },
     ];
     const nodeMods = patch.nodes
-      .filter((n) => MODULE_REGISTRY[n.type]?.category === 'modulator')
+      .filter((n) => MODULE_REGISTRY[n.type]?.ports.some((p) => p.direction === 'out' && p.signal === 'cv'))
       .map((n) => ({
         value: n.id,
-        label: `${n.label || MODULE_REGISTRY[n.type].label} (MOD)`,
+        label: `${n.label || MODULE_REGISTRY[n.type].label} (CV)`,
       }));
     return [...base, ...nodeMods];
   }, [patch.nodes, patch.macroLabels]);

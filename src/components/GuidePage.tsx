@@ -11,7 +11,11 @@ import {
   Sliders,
   Volume2,
 } from 'lucide-react';
-import { MODULE_REGISTRY } from '../engine/moduleRegistry';
+import {
+  MODULE_CATEGORY_META,
+  MODULE_REGISTRY,
+  isCyanModuleCategory,
+} from '../engine/moduleRegistry';
 import { ModuleDefinition, ModuleType } from '../engine/types';
 
 export interface GuidePageProps {
@@ -22,7 +26,7 @@ export interface GuidePageProps {
 }
 
 type GuideSectionId = 'signal-flow' | 'recipes' | 'modules' | 'modulation' | 'analysis-export';
-type ModuleFilter = 'all' | 'source' | 'processor' | 'modulator' | 'fx';
+type ModuleFilter = 'all' | 'source' | 'filter' | 'shaper' | 'modulator' | 'fx' | 'utility';
 
 interface InstrumentRecipe {
   id: string;
@@ -236,29 +240,29 @@ const MODULE_ORDER: ModuleType[] = [
   'fmOperator',
   'subHarmonic',
   'noise',
-  'combFilter',
-  'parametricEq',
   'filter',
   'formantFilter',
+  'combFilter',
+  'parametricEq',
   'shaper',
   'wavefolder',
   'ringMod',
   'bitcrusher',
-  'crossfader',
   'envelope',
   'lfo',
-  'sampleHold',
   'slopeEnv',
+  'sampleHold',
   'stepSequencer',
   'envFollower',
-  'quantizer',
-  'cvUtility',
   'chorus',
   'phaser',
   'granularCloud',
   'delay',
   'reverb',
   'busCompressor',
+  'crossfader',
+  'quantizer',
+  'cvUtility',
   'output',
 ];
 
@@ -276,8 +280,8 @@ export const GuidePage: React.FC<GuidePageProps> = ({
     const q = moduleSearch.trim().toLowerCase();
     return MODULE_ORDER.map((t) => MODULE_REGISTRY[t]).filter((def) => {
       if (moduleFilter !== 'all') {
-        if (moduleFilter === 'fx' && def.category !== 'fx' && def.category !== 'io') return false;
-        if (moduleFilter !== 'fx' && def.category !== moduleFilter) return false;
+        if (moduleFilter === 'utility' && def.category !== 'utility' && def.category !== 'io') return false;
+        if (moduleFilter !== 'utility' && def.category !== moduleFilter) return false;
       }
       if (!q) return true;
       return (
@@ -640,14 +644,16 @@ export const GuidePage: React.FC<GuidePageProps> = ({
                       className="h-8 pl-8 pr-3 text-xs bg-white dark:bg-[#0B0F17] border border-slate-300 dark:border-slate-700 rounded text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500 w-48"
                     />
                   </div>
-                  <div className="flex items-center bg-slate-100 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-0.5 text-[11px]">
+                  <div className="flex items-center flex-wrap bg-slate-100 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded p-0.5 text-[11px]">
                     {(
                       [
                         { id: 'all', label: 'All' },
                         { id: 'source', label: 'Sources' },
-                        { id: 'processor', label: 'Processors' },
+                        { id: 'filter', label: 'Filters' },
+                        { id: 'shaper', label: 'Shapers' },
                         { id: 'modulator', label: 'Modulators' },
-                        { id: 'fx', label: 'FX / Out' },
+                        { id: 'fx', label: 'Effects' },
+                        { id: 'utility', label: 'Utilities & Out' },
                       ] as { id: ModuleFilter; label: string }[]
                     ).map((f) => (
                       <button
@@ -669,7 +675,7 @@ export const GuidePage: React.FC<GuidePageProps> = ({
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {orderedModules.map((def) => {
-                  const isModOrProc = def.category === 'modulator' || def.category === 'processor';
+                  const isModOrProc = isCyanModuleCategory(def.category);
                   const inPorts = def.ports.filter((p) => p.direction === 'in');
                   const outPorts = def.ports.filter((p) => p.direction === 'out');
 
@@ -699,7 +705,7 @@ export const GuidePage: React.FC<GuidePageProps> = ({
                               : 'border-amber-500/35 text-amber-800 dark:text-amber-300 bg-amber-500/10'
                           }`}
                         >
-                          {def.category}
+                          {MODULE_CATEGORY_META[def.category].shortLabel}
                         </span>
                       </div>
 
