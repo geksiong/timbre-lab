@@ -942,6 +942,41 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
       { key: 'mix', label: 'Dry / Wet Mix', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.55 },
     ],
   },
+  phaser: {
+    type: 'phaser',
+    label: 'Stereo Phaser / Flanger',
+    category: 'processor',
+    description: '6-stage quadrature allpass phaser and resonant jet flanger with bipolar feedback and stereo phase offset.',
+    acousticGuide:
+      'Sweeps a series of phase-shifted notches (Phaser) or ultra-short comb teeth (Flanger) across the stereo image for swirling motion, metallic sheen, or lush string sweep.',
+    bowedTip:
+      'Use subtle Phaser mode (Rate 0.15–0.35 Hz, Mix 0.25–0.38, Stereo 120°) behind bowed pads for slow acoustic air shimmer.',
+    ports: [
+      { id: 'in', label: 'Audio In', direction: 'in', signal: 'audio' },
+      { id: 'rate', label: 'Rate CV', direction: 'in', signal: 'cv' },
+      { id: 'center', label: 'Sweep Center CV', direction: 'in', signal: 'cv' },
+      { id: 'mix', label: 'Mix CV', direction: 'in', signal: 'cv' },
+      { id: 'out', label: 'Audio Out', direction: 'out', signal: 'audio' },
+    ],
+    params: [
+      {
+        key: 'mode',
+        label: 'Effect Mode',
+        type: 'select',
+        options: [
+          { value: 'phaser', label: '6-Stage Stereo Phaser' },
+          { value: 'flanger', label: 'Resonant Jet Flanger' },
+        ],
+        defaultValue: 'phaser',
+      },
+      { key: 'rate', label: 'Sweep Rate', type: 'range', min: 0.03, max: 8.0, step: 0.02, unit: 'Hz', scale: 'log', defaultValue: 0.45 },
+      { key: 'depth', label: 'Sweep Depth', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.65 },
+      { key: 'centerFreq', label: 'Center Freq', type: 'range', min: 120, max: 5000, step: 20, unit: 'Hz', scale: 'log', defaultValue: 900 },
+      { key: 'feedback', label: 'Resonant Feedback', type: 'range', min: -0.88, max: 0.88, step: 0.02, unit: '', defaultValue: 0.55 },
+      { key: 'stereoPhase', label: 'Stereo Spread', type: 'range', min: 0, max: 180, step: 2, unit: '°', defaultValue: 90 },
+      { key: 'mix', label: 'Dry / Wet Mix', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.6 },
+    ],
+  },
   envelope: {
     type: 'envelope',
     label: 'ADSR Envelope',
@@ -1129,6 +1164,72 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
       { key: 'invert', label: 'Invert (Sidechain Duck)', type: 'toggle', defaultValue: false, tooltip: 'Inverts output (1 - level) so loud audio ducks target parameters.' },
     ],
   },
+  quantizer: {
+    type: 'quantizer',
+    label: 'Scale Quantizer',
+    category: 'modulator',
+    description: 'Snaps any stepped or sweeping CV signal to exact musical scale degrees (Major, Minor, Pentatonic, Dorian, Hijaz, Fifths).',
+    acousticGuide:
+      'Turns raw random voltages from Sample & Hold, LFOs, or Step Sequencers into tuned musical melodies or harmonic arpeggio intervals when wired to Pitch CV at 1.0x.',
+    ports: [
+      { id: 'in', label: 'Raw Pitch CV In', direction: 'in', signal: 'cv' },
+      { id: 'cv', label: 'Quantized CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      {
+        key: 'scale',
+        label: 'Musical Scale',
+        type: 'select',
+        options: [
+          { value: 'pentatonicMinor', label: 'Minor Pentatonic' },
+          { value: 'pentatonicMajor', label: 'Major Pentatonic' },
+          { value: 'major', label: 'Major (Ionian)' },
+          { value: 'minor', label: 'Natural Minor' },
+          { value: 'dorian', label: 'Dorian Mode' },
+          { value: 'phrygianDom', label: 'Hijaz / Phrygian Dominant' },
+          { value: 'wholeTone', label: 'Whole Tone (Dream)' },
+          { value: 'fifths', label: 'Octaves & Fifths' },
+          { value: 'chromatic', label: 'Chromatic (12-TET)' },
+        ],
+        defaultValue: 'pentatonicMinor',
+      },
+      { key: 'root', label: 'Root Offset', type: 'range', min: 0, max: 11, step: 1, unit: 'st', defaultValue: 0 },
+      { key: 'octaves', label: 'Input Octave Span', type: 'range', min: 0.25, max: 3.0, step: 0.25, unit: 'oct', defaultValue: 1.0 },
+      { key: 'transpose', label: 'Transpose', type: 'range', min: -12, max: 12, step: 1, unit: 'st', defaultValue: 0 },
+      { key: 'glideMs', label: 'Note Glide', type: 'range', min: 0, max: 120, step: 2, unit: 'ms', defaultValue: 0, tooltip: 'Adds smooth portamento between quantized pitches.' },
+    ],
+  },
+  cvUtility: {
+    type: 'cvUtility',
+    label: 'CV Attenuverter & Math',
+    category: 'modulator',
+    description: 'Dual-input bipolar CV mixer, inverter, offset bias, rectifier, and slew smoother.',
+    acousticGuide:
+      'Scales, inverts, offsets, or combines two modulation signals—letting you turn a bipolar LFO into a positive-only sweep, invert an envelope, or blend two modulators.',
+    ports: [
+      { id: 'inA', label: 'CV In A', direction: 'in', signal: 'cv' },
+      { id: 'inB', label: 'CV In B', direction: 'in', signal: 'cv' },
+      { id: 'cv', label: 'Math CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      { key: 'gainA', label: 'In A Attenuverter', type: 'range', min: -2, max: 2, step: 0.02, unit: 'x', defaultValue: 1.0, tooltip: 'Negative values invert the modulation polarity.' },
+      { key: 'gainB', label: 'In B Attenuverter', type: 'range', min: -2, max: 2, step: 0.02, unit: 'x', defaultValue: 0.5 },
+      { key: 'offset', label: 'DC Bias Offset', type: 'range', min: -1, max: 1, step: 0.02, unit: '', defaultValue: 0.0 },
+      {
+        key: 'rectify',
+        label: 'Polarity / Rectify',
+        type: 'select',
+        options: [
+          { value: 'none', label: 'Bipolar Pass-Through' },
+          { value: 'half', label: 'Half-Wave (Clamp >= 0)' },
+          { value: 'full', label: 'Full-Wave Rectify (Abs)' },
+          { value: 'clamp01', label: 'Unit Clamp (0 to 1)' },
+        ],
+        defaultValue: 'none',
+      },
+      { key: 'slewMs', label: 'Lag / Slew Smooth', type: 'range', min: 0, max: 250, step: 2, unit: 'ms', defaultValue: 0 },
+    ],
+  },
   delay: {
     type: 'delay',
     label: 'Stereo Delay',
@@ -1182,6 +1283,28 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
       { key: 'modulation', label: 'Tail Drift', type: 'range', min: 0, max: 1, step: 0.02, unit: '', defaultValue: 0.25 },
       { key: 'freeze', label: 'Freeze Tail', type: 'toggle', defaultValue: false, tooltip: 'Holds the current reverb wash indefinitely as a harmonic drone bed.' },
       { key: 'mix', label: 'Wet Mix', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.28 },
+    ],
+  },
+  busCompressor: {
+    type: 'busCompressor',
+    label: 'Bus Compressor / Glue',
+    category: 'fx',
+    description: 'Master bus stereo dynamics compressor with soft analog tape saturation and parallel dry/wet blend.',
+    acousticGuide:
+      'Gently glues multi-layered oscillators, physical strings, and reverb tails together for cohesive studio punch, or delivers parallel compression sustain.',
+    ports: [
+      { id: 'in', label: 'Audio In', direction: 'in', signal: 'audio' },
+      { id: 'out', label: 'Audio Out', direction: 'out', signal: 'audio' },
+    ],
+    params: [
+      { key: 'threshold', label: 'Threshold', type: 'range', min: -42, max: 0, step: 0.5, unit: 'dB', defaultValue: -16 },
+      { key: 'ratio', label: 'Ratio', type: 'range', min: 1, max: 16, step: 0.25, unit: ':1', defaultValue: 4.0 },
+      { key: 'knee', label: 'Soft Knee', type: 'range', min: 0, max: 30, step: 1, unit: 'dB', defaultValue: 12 },
+      { key: 'attackMs', label: 'Attack', type: 'range', min: 1, max: 120, step: 1, unit: 'ms', scale: 'log', defaultValue: 12 },
+      { key: 'releaseMs', label: 'Release', type: 'range', min: 30, max: 1000, step: 10, unit: 'ms', scale: 'log', defaultValue: 180 },
+      { key: 'tapeGlue', label: 'Analog Tape Glue', type: 'range', min: 0, max: 1, step: 0.02, unit: '', defaultValue: 0.22, tooltip: 'Adds warm soft-knee saturation prior to output limiting.' },
+      { key: 'makeup', label: 'Makeup Gain', type: 'range', min: 0.5, max: 3.0, step: 0.02, unit: 'x', defaultValue: 1.25 },
+      { key: 'mix', label: 'Parallel Blend', type: 'range', min: 0, max: 1, step: 0.02, unit: '', defaultValue: 0.85, tooltip: 'Blends uncompressed transients with squashed compressed bus (NY parallel style).' },
     ],
   },
   output: {

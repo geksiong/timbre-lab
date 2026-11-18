@@ -26,21 +26,6 @@ interface NodeInspectorProps {
   onCollapse?: () => void;
 }
 
-const CV_TARGET_PORTS = new Set([
-  'cutoff',
-  'pitch',
-  'index',
-  'bow',
-  'freq',
-  'fb',
-  'amp',
-  'rate',
-  'depth',
-  'density',
-  'mix',
-  'shape',
-]);
-
 function biquadDbAtFreq(
   type: 'lowshelf' | 'highshelf' | 'peaking',
   freqHz: number,
@@ -567,7 +552,15 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                 <div className="space-y-2.5">
                   {nodeConnections.map((conn) => {
                     const isOutgoing = conn.fromNode === selectedNode.id;
-                    const isCv = conn.fromPort === 'cv' || CV_TARGET_PORTS.has(conn.toPort);
+                    const fromNodeObj = patch.nodes.find((n) => n.id === conn.fromNode);
+                    const toNodeObj = patch.nodes.find((n) => n.id === conn.toNode);
+                    const fromSig = fromNodeObj
+                      ? MODULE_REGISTRY[fromNodeObj.type]?.ports.find((p) => p.id === conn.fromPort)?.signal
+                      : undefined;
+                    const toSig = toNodeObj
+                      ? MODULE_REGISTRY[toNodeObj.type]?.ports.find((p) => p.id === conn.toPort)?.signal
+                      : undefined;
+                    const isCv = fromSig === 'cv' || toSig === 'cv' || conn.fromPort === 'cv';
                     return (
                       <div
                         key={conn.id}

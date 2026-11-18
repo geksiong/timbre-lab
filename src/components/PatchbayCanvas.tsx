@@ -97,6 +97,8 @@ function getNodeSummary(node: SynthNode): string {
       return `A↔B ${Math.round(Number(p.balance ?? 0.5) * 100)}% · ${String(p.curve ?? 'equalPower')}`;
     case 'chorus':
       return `${Number(p.voices ?? 4)}-tap · ${Number(p.rate ?? 0.42).toFixed(2)} Hz · ${Math.round(Number(p.mix ?? 0.52) * 100)}%`;
+    case 'phaser':
+      return `${String(p.mode ?? 'phaser')} · ${Number(p.rate ?? 0.45).toFixed(2)} Hz · ${Math.round(Number(p.mix ?? 0.6) * 100)}%`;
     case 'granularCloud': {
       const frozen = Boolean(p.freeze);
       const st = Number(p.pitchShift ?? 12);
@@ -114,6 +116,12 @@ function getNodeSummary(node: SynthNode): string {
       return `${Number(p.steps ?? 8)} steps · ${Number(p.rate ?? 4.0).toFixed(1)} Hz · ${String(p.direction ?? 'forward')}`;
     case 'envFollower':
       return `A ${Math.round(Number(p.attackMs ?? 8))}ms · R ${Math.round(Number(p.releaseMs ?? 140))}ms${p.invert ? ' · INV' : ''}`;
+    case 'quantizer': {
+      const tr = Number(p.transpose ?? 0);
+      return `${String(p.scale ?? 'pentatonicMinor')}${tr !== 0 ? ` · ${tr > 0 ? `+${tr}` : tr}st` : ''}`;
+    }
+    case 'cvUtility':
+      return `A×${Number(p.gainA ?? 1).toFixed(1)} + B×${Number(p.gainB ?? 0.5).toFixed(1)}${p.rectify && p.rectify !== 'none' ? ` · ${String(p.rectify)}` : ''}`;
     case 'delay':
       return `${Math.round(Number(p.time ?? 0.26) * 1000)} ms · fb ${Math.round(Number(p.feedback ?? 0.32) * 100)}%`;
     case 'reverb': {
@@ -121,6 +129,8 @@ function getNodeSummary(node: SynthNode): string {
       const fr = Boolean(p.freeze);
       return `${Number(p.size ?? 1.4).toFixed(1)}s${fr ? ' · FRZ' : sh > 0.02 ? ` · shm ${Math.round(sh * 100)}%` : ''} · ${Math.round(Number(p.mix ?? 0.28) * 100)}%`;
     }
+    case 'busCompressor':
+      return `${Math.round(Number(p.threshold ?? -16))} dB · ${Number(p.ratio ?? 4).toFixed(1)}:1 · mix ${Math.round(Number(p.mix ?? 0.85) * 100)}%`;
     case 'output':
       return `gain ${Math.round(Number(p.gain ?? 0.82) * 100)}%`;
     default:
@@ -353,6 +363,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     'bitcrusher',
     'crossfader',
     'chorus',
+    'phaser',
     'granularCloud',
     'envelope',
     'lfo',
@@ -360,8 +371,11 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     'slopeEnv',
     'stepSequencer',
     'envFollower',
+    'quantizer',
+    'cvUtility',
     'delay',
     'reverb',
+    'busCompressor',
   ];
 
   return (

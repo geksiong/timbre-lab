@@ -2,6 +2,7 @@ import { ALTERNATIVE_CARRIER_WORKLET_CODE } from './carrierWaves';
 import { SOURCE_WORKLET_CODE } from './sourceWorklets';
 import { PROCESSOR_WORKLET_CODE } from './processorWorklets';
 import { MODULATOR_WORKLET_CODE } from './modulatorWorklets';
+import { UTILITY_FX_WORKLET_CODE } from './utilityFxWorklets';
 
 export function generateStandaloneEngineSource(): string {
   return `/**
@@ -387,7 +388,8 @@ registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
 ${SOURCE_WORKLET_CODE}
 ${PROCESSOR_WORKLET_CODE}
-${MODULATOR_WORKLET_CODE}
+\${MODULATOR_WORKLET_CODE}
+\${UTILITY_FX_WORKLET_CODE}
 \`;
 
 const VALID_OSC_TYPES = new Set(['sine', 'square', 'sawtooth', 'triangle']);
@@ -400,6 +402,9 @@ const RINGMOD_MAP = { ring: 0, am: 1, rectified: 2 };
 const SH_MODE_MAP = { random: 0, quantized: 1, external: 2 };
 const SLOPE_MODE_MAP = { oneShot: 0, asr: 1, loop: 2 };
 const SEQ_DIR_MAP = { forward: 0, pendulum: 1, random: 2 };
+const QUANT_SCALE_MAP = { chromatic: 0, major: 1, minor: 2, pentatonicMinor: 3, pentatonicMajor: 4, dorian: 5, phrygianDom: 6, wholeTone: 7, fifths: 8 };
+const CV_RECT_MAP = { none: 0, half: 1, full: 2, clamp01: 3 };
+const PHASER_MODE_MAP = { phaser: 0, flanger: 1 };
 const VALID_FILTER_TYPES = new Set(['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']);
 
 function parseHarmonicsArr(raw) {
@@ -597,7 +602,7 @@ export class TimbreLabSynth {
     }
     if (!this.ctx || !this.patch) return;
     const sig = this.patch.nodes
-      .filter((n) => n.type === 'delay' || n.type === 'reverb' || n.type === 'output')
+      .filter((n) => n.type === 'delay' || n.type === 'reverb' || n.type === 'busCompressor' || n.type === 'output')
       .map((n) => n.id + ':' + n.type + ':' + Boolean(n.bypassed))
       .join('|');
     if (sig !== this.lastFxSignature) this._rebuildMasterFx();
@@ -772,14 +777,14 @@ export class TimbreLabSynth {
   _rebuildMasterFx() {
     if (!this.ctx || !this.patch || !this.masterInputBus || !this.masterSafetyClipper) return;
     this.lastFxSignature = this.patch.nodes
-      .filter((n) => n.type === 'delay' || n.type === 'reverb' || n.type === 'output')
+      .filter((n) => n.type === 'delay' || n.type === 'reverb' || n.type === 'busCompressor' || n.type === 'output')
       .map((n) => n.id + ':' + n.type + ':' + Boolean(n.bypassed))
       .join('|');
     try { this.masterInputBus.disconnect(); } catch {}
     this.masterFxChain.forEach((n) => { try { n.stop && n.stop(); n.input.disconnect(); n.output.disconnect(); } catch {} });
     this.masterFxChain = [];
-    const fxNodes = this.patch.nodes.filter((n) => !n.bypassed && (n.type === 'delay' || n.type === 'reverb' || n.type === 'output'));
-    const weight = (t) => (t === 'delay' ? 1 : t === 'reverb' ? 2 : 3);
+    const fxNodes = this.patch.nodes.filter((n) => !n.bypassed && (n.type === 'delay' || n.type === 'reverb' || n.type === 'busCompressor' || n.type === 'output'));
+    const weight = (t) => (t === 'delay' ? 1 : t === 'reverb' ? 2 : t === 'busCompressor' ? 3 : 4);
     fxNodes.sort((a, b) => weight(a.type) - weight(b.type));
     let prev = this.masterInputBus;
     for (const node of fxNodes) {
@@ -857,6 +862,34 @@ export class TimbreLabSynth {
         update();
         prev.connect(inp); prev = out;
         this.masterFxChain.push({ id: node.id, input: inp, output: out, update, stop: () => { if (sw) try { sw.port.postMessage('stop'); } catch {} } });
+      } else if (node.type === 'busCompressor') {
+        const inp = this.ctx.createGain(), out = this.ctx.createGain(), dry = this.ctx.createGain(), wet = this.ctx.createGain();
+        const comp = this.ctx.createDynamicsCompressor(), shaper = this.ctx.createWaveShaper(), shDry = this.ctx.createGain(), shWet = this.ctx.createGain(), makeup = this.ctx.createGain();
+        shaper.oversample = '2x';
+        inp.connect(dry); dry.connect(out);
+        inp.connect(comp); comp.connect(shDry); shDry.connect(makeup); comp.connect(shaper); shaper.connect(shWet); shWet.connect(makeup); makeup.connect(wet); wet.connect(out);
+        let lastDrive = -1;
+        const update = () => {
+          comp.threshold.value = clampFinite((Number(p.threshold) ?? -16) + this._getMasterOffset(node.id, 'threshold') * 20, -60, 0, -16);
+          comp.ratio.value = clampFinite(p.ratio, 1, 20, 4.0);
+          comp.knee.value = clampFinite(p.knee, 0, 40, 12);
+          comp.attack.value = clampFinite(p.attackMs, 1, 150, 12) / 1000;
+          comp.release.value = clampFinite(p.releaseMs, 20, 1000, 180) / 1000;
+          const tg = clampFinite(p.tapeGlue, 0, 1, 0.22);
+          const dVal = 1 + tg * 0.65 * 14;
+          if (Math.abs(dVal - lastDrive) > 0.05) {
+            const c = new Float32Array(1024), norm = Math.tanh(dVal) || 1;
+            for (let i = 0; i < 1024; i++) { const x = (i * 2) / 1023 - 1; c[i] = Math.tanh(x * dVal) / norm; }
+            shaper.curve = c; lastDrive = dVal;
+          }
+          shDry.gain.value = 1 - tg * 0.75; shWet.gain.value = tg * 0.75;
+          makeup.gain.value = clampFinite((Number(p.makeup) || 1.25) + this._getMasterOffset(node.id, 'makeup') * 1.2, 0.2, 4.0, 1.25);
+          const mx = clampFinite((Number(p.mix) ?? 0.85) + this._getMasterOffset(node.id, 'mix') * 0.75, 0, 1, 0.85);
+          dry.gain.value = 1 - mx; wet.gain.value = mx;
+        };
+        update();
+        prev.connect(inp); prev = out;
+        this.masterFxChain.push({ id: node.id, input: inp, output: out, update });
       }
     }
     prev.connect(this.masterSafetyClipper);
@@ -874,7 +907,7 @@ export class TimbreLabSynth {
 
     try {
     for (const node of this.patch.nodes) {
-      if (node.type === 'delay' || node.type === 'reverb' || node.type === 'output') continue;
+      if (node.type === 'delay' || node.type === 'reverb' || node.type === 'busCompressor' || node.type === 'output') continue;
       if (node.bypassed) {
         const g = track(ctx.createGain());
         audioIn.set(node.id + ':in', g); audioIn.set(node.id + ':inA', g); audioOut.set(node.id + ':out', g);
@@ -1394,6 +1427,35 @@ export class TimbreLabSynth {
           inp.connect(dry); dry.connect(out); inp.connect(d1); d1.connect(wet); wet.connect(out);
           audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
         }
+      } else if (node.type === 'phaser') {
+        const inp = track(ctx.createGain()), out = track(ctx.createGain());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-phaser-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            inp.connect(w); w.connect(out);
+            const rp = w.parameters.get('rate'), dp = w.parameters.get('depth'), cp = w.parameters.get('centerFreq'), fp = w.parameters.get('feedback'), mp = w.parameters.get('mix');
+            w.parameters.get('mode').value = PHASER_MODE_MAP[String(p.mode || 'phaser')] ?? 0;
+            rp.value = clampFinite(p.rate, 0.03, 8.0, 0.45); dp.value = clampFinite(p.depth, 0, 1, 0.65); cp.value = clampFinite(p.centerFreq, 120, 5000, 900);
+            fp.value = clampFinite(p.feedback, -0.88, 0.88, 0.55); w.parameters.get('stereoPhase').value = clampFinite(p.stereoPhase, 0, 180, 90); mp.value = clampFinite(p.mix, 0, 1, 0.6);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
+            cvTarget.set(node.id + ':rate', { param: rp, scale: 2.5 }); cvTarget.set(node.id + ':center', { param: cp, scale: 1200 }); cvTarget.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            modTargets.set(node.id + ':rate', { param: rp, scale: 2.5 }); modTargets.set(node.id + ':depth', { param: dp, scale: 0.5 }); modTargets.set(node.id + ':centerFreq', { param: cp, scale: 1200 }); modTargets.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const dry = track(ctx.createGain()), wet = track(ctx.createGain()), lfo = track(ctx.createOscillator()), lg = track(ctx.createGain()), mx = clampFinite(p.mix, 0, 1, 0.6);
+          const aps = [0, 1, 2, 3].map(() => { const a = track(ctx.createBiquadFilter()); a.type = 'allpass'; a.frequency.value = clampFinite(p.centerFreq, 120, 5000, 900); return a; });
+          lfo.frequency.value = clampFinite(p.rate, 0.03, 8.0, 0.45); lg.gain.value = clampFinite(p.depth, 0, 1, 0.65) * 1800; lfo.connect(lg);
+          aps.forEach((a, i) => { lg.connect(a.detune); if (i === 0) inp.connect(a); else aps[i - 1].connect(a); });
+          dry.gain.value = 1 - mx * 0.4; wet.gain.value = mx * 0.85;
+          inp.connect(dry); dry.connect(out); aps[3].connect(wet); wet.connect(out); lfo.start(now); stops.push(() => lfo.stop());
+          audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
+          cvTarget.set(node.id + ':rate', { param: lfo.frequency, scale: 2.5 }); cvTarget.set(node.id + ':center', { param: aps[0].frequency, scale: 1200 }); cvTarget.set(node.id + ':mix', { param: wet.gain, scale: 0.6 });
+          modTargets.set(node.id + ':rate', { param: lfo.frequency, scale: 2.5 }); modTargets.set(node.id + ':mix', { param: wet.gain, scale: 0.6 });
+        }
       } else if (node.type === 'envelope') {
         const vca = track(ctx.createGain()), vcaAmp = track(ctx.createGain()), cs = track(ctx.createConstantSource()), cvg = track(ctx.createGain());
         vca.connect(vcaAmp); cs.offset.value = 1; cs.connect(cvg); cs.start(now); stops.push(() => cs.stop());
@@ -1541,6 +1603,50 @@ export class TimbreLabSynth {
           const fc = track(ctx.createConstantSource()), fg = track(ctx.createGain()); fc.offset.value = 0; fc.connect(fg); fc.start(now); stops.push(() => fc.stop());
           audioIn.set(node.id + ':in', sIn); cvOut.set(node.id + ':cv', fg);
         }
+      } else if (node.type === 'quantizer') {
+        const iC = track(ctx.createConstantSource()); iC.offset.value = 0; iC.start(now); stops.push(() => iC.stop());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-quantizer-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }));
+            iC.connect(w); stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const op = w.parameters.get('octaves'), tp = w.parameters.get('transpose');
+            w.parameters.get('scale').value = QUANT_SCALE_MAP[String(p.scale || 'pentatonicMinor')] ?? 3;
+            w.parameters.get('root').value = Math.max(0, Math.min(11, Math.round(Number(p.root) || 0)));
+            op.value = clampFinite(p.octaves, 0.25, 3.0, 1.0); tp.value = clampFinite(p.transpose, -24, 24, 0);
+            w.parameters.get('glideMs').value = clampFinite(p.glideMs, 0, 200, 0);
+            cvOut.set(node.id + ':cv', w); cvTarget.set(node.id + ':in', { param: iC.offset, scale: 1.0 });
+            modTargets.set(node.id + ':transpose', { param: tp, scale: 12 }); modTargets.set(node.id + ':octaves', { param: op, scale: 1.0 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const fg = track(ctx.createGain()); fg.gain.value = clampFinite(p.octaves, 0.25, 3.0, 1.0);
+          iC.connect(fg); cvOut.set(node.id + ':cv', fg); cvTarget.set(node.id + ':in', { param: iC.offset, scale: 1.0 });
+        }
+      } else if (node.type === 'cvUtility') {
+        const aC = track(ctx.createConstantSource()), bC = track(ctx.createConstantSource());
+        aC.offset.value = 0; bC.offset.value = 0; aC.start(now); bC.start(now); stops.push(() => { aC.stop(); bC.stop(); });
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-cvutil-processor', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [1] }));
+            aC.connect(w, 0, 0); bC.connect(w, 0, 1); stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const gAp = w.parameters.get('gainA'), gBp = w.parameters.get('gainB'), op = w.parameters.get('offset');
+            gAp.value = clampFinite(p.gainA, -2, 2, 1.0); gBp.value = clampFinite(p.gainB, -2, 2, 0.5); op.value = clampFinite(p.offset, -1.5, 1.5, 0);
+            w.parameters.get('rectify').value = CV_RECT_MAP[String(p.rectify || 'none')] ?? 0;
+            w.parameters.get('slewMs').value = clampFinite(p.slewMs, 0, 250, 0);
+            cvOut.set(node.id + ':cv', w); cvTarget.set(node.id + ':inA', { param: aC.offset, scale: 1.0 }); cvTarget.set(node.id + ':inB', { param: bC.offset, scale: 1.0 });
+            modTargets.set(node.id + ':gainA', { param: gAp, scale: 1.0 }); modTargets.set(node.id + ':gainB', { param: gBp, scale: 1.0 }); modTargets.set(node.id + ':offset', { param: op, scale: 0.75 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const gA = track(ctx.createGain()), gB = track(ctx.createGain()), oC = track(ctx.createConstantSource()), oS = track(ctx.createGain());
+          gA.gain.value = clampFinite(p.gainA, -2, 2, 1.0); gB.gain.value = clampFinite(p.gainB, -2, 2, 0.5); oC.offset.value = clampFinite(p.offset, -1.5, 1.5, 0);
+          aC.connect(gA); gA.connect(oS); bC.connect(gB); gB.connect(oS); oC.connect(oS); oC.start(now); stops.push(() => oC.stop());
+          cvOut.set(node.id + ':cv', oS); cvTarget.set(node.id + ':inA', { param: aC.offset, scale: 1.0 }); cvTarget.set(node.id + ':inB', { param: bC.offset, scale: 1.0 });
+        }
       }
     }
 
@@ -1551,7 +1657,7 @@ export class TimbreLabSynth {
       const sc = cvOut.get(c.fromNode + ':' + c.fromPort);
       if (sa) {
         const targetNode = this.patch.nodes.find((n) => n.id === c.toNode);
-        if (targetNode && (targetNode.type === 'delay' || targetNode.type === 'reverb' || targetNode.type === 'output')) {
+        if (targetNode && (targetNode.type === 'delay' || targetNode.type === 'reverb' || targetNode.type === 'busCompressor' || targetNode.type === 'output')) {
           const idx = fxIndex.get(c.toNode);
           const sg = track(ctx.createGain()); sg.gain.value = clampFinite(c.amount, 0, 2, 1);
           sa.connect(sg); sg.connect(idx !== undefined ? this.masterFxChain[idx].input : masterEntry);

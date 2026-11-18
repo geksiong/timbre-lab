@@ -23,8 +23,12 @@ export type ModuleType =
   | 'slopeEnv'
   | 'stepSequencer'
   | 'envFollower'
+  | 'quantizer'
+  | 'cvUtility'
+  | 'phaser'
   | 'delay'
   | 'reverb'
+  | 'busCompressor'
   | 'output';
 
 export type PortSignalType = 'audio' | 'cv';

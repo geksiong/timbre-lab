@@ -135,6 +135,12 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'depth', label: 'Ensemble Depth' },
     { key: 'mix', label: 'Chorus Wet Mix' },
   ],
+  phaser: [
+    { key: 'rate', label: 'Sweep Rate' },
+    { key: 'depth', label: 'Sweep Depth' },
+    { key: 'centerFreq', label: 'Center Freq' },
+    { key: 'mix', label: 'Phaser Wet Mix' },
+  ],
   granularCloud: [
     { key: 'grainSize', label: 'Grain Size' },
     { key: 'density', label: 'Grain Density' },
@@ -167,6 +173,15 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'sensitivity', label: 'Input Sensitivity' },
     { key: 'depth', label: 'Output Depth' },
   ],
+  quantizer: [
+    { key: 'transpose', label: 'Transpose' },
+    { key: 'octaves', label: 'Input Octave Span' },
+  ],
+  cvUtility: [
+    { key: 'gainA', label: 'In A Attenuverter' },
+    { key: 'gainB', label: 'In B Attenuverter' },
+    { key: 'offset', label: 'DC Bias Offset' },
+  ],
   delay: [
     { key: 'feedback', label: 'Echo Feedback' },
     { key: 'tone', label: 'Echo High Cut' },
@@ -177,6 +192,11 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'damping', label: 'Air Damping' },
     { key: 'modulation', label: 'Tail Drift' },
     { key: 'mix', label: 'Reverb Wet Mix' },
+  ],
+  busCompressor: [
+    { key: 'threshold', label: 'Comp Threshold' },
+    { key: 'makeup', label: 'Makeup Gain' },
+    { key: 'mix', label: 'Parallel Blend' },
   ],
 };
 

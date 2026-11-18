@@ -251,10 +251,14 @@ const MODULE_ORDER: ModuleType[] = [
   'slopeEnv',
   'stepSequencer',
   'envFollower',
+  'quantizer',
+  'cvUtility',
   'chorus',
+  'phaser',
   'granularCloud',
   'delay',
   'reverb',
+  'busCompressor',
   'output',
 ];
 

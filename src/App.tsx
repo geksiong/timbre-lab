@@ -640,6 +640,8 @@ export default function App() {
       sampleHold: 0,
       slopeEnv: 0,
       stepSequencer: 0,
+      quantizer: 0,
+      cvUtility: 0,
       crossfader: 1,
       combFilter: 1,
       shaper: 1,
@@ -651,10 +653,12 @@ export default function App() {
       formantFilter: 2,
       parametricEq: 2,
       chorus: 3,
+      phaser: 3,
       granularCloud: 3,
       envelope: 4,
       delay: 5,
       reverb: 6,
+      busCompressor: 6,
       output: 7,
     };
     setPatch((prev) => {
