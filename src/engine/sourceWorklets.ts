@@ -49,7 +49,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
       [1.0, 2.0, 2.42, 3.0, 4.18, 5.43, 6.79, 8.21],    // 1: Bronze Bell / Bowl
       [1.0, 2.76, 5.40, 8.93, 13.34, 18.6, 24.5, 31.2], // 2: Kalimba / Tine
       [1.0, 2.0, 3.0, 4.04, 5.15, 6.28, 7.45, 8.71],    // 3: Steel Drum
-      [1.0, 1.59, 2.14, 2.65, 3.16, 3.89, 4.48, 5.21],  // 4: Metallic Plate / Gong
+      [1.0, 1.59, 2.14, 2.65, 3.16, 3.89, 4.48, 5.21],  // 4: Metallic Plate / Gong / Membrane
       [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]          // 5: Harmonic Bank
     ];
     this.amps = [
@@ -100,9 +100,15 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     if (gate > 0.5 && !this.lastTriggered) {
       this.lastTriggered = true;
       const b0 = this.clamp(brightArr[0], 0.05, 1, 0.65);
-      // Harder mallet = shorter sharper impact; softer mallet = longer warmer thump
-      this.strikeTotal = excType === 1 ? Math.max(24, Math.round(sampleRate * 0.004)) : Math.max(18, Math.round(sampleRate * (0.008 - b0 * 0.0062)));
+      const fInit = this.clamp(freqArr[0], 20, 4000, 220);
+      const periodSamples = sampleRate / Math.max(40, fInit);
+      const maxStrike = Math.max(10, Math.round(sampleRate * (0.0055 - b0 * 0.0040)));
+      const pitchAdapted = Math.max(8, Math.round(periodSamples * (0.68 - b0 * 0.38)));
+      this.strikeTotal = excType === 1
+        ? Math.min(Math.round(sampleRate * 0.0030), Math.max(8, Math.round(periodSamples * 0.44)))
+        : Math.min(maxStrike, pitchAdapted);
       this.strikeSamples = this.strikeTotal;
+      this.x1 = 0;
       if (excType === 2) this.contEnv = 0.2;
     } else if (gate < 0.5) {
       this.lastTriggered = false;
@@ -114,7 +120,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
 
       let exc = 0;
       if (ext && Number.isFinite(ext[i])) {
-        exc += Math.max(-2, Math.min(2, ext[i])) * excMix * 0.4;
+        exc += Math.max(-2, Math.min(2, ext[i])) * excMix * 0.32;
       }
 
       if (excType === 2) {
@@ -122,22 +128,19 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
         this.contEnv += (target - this.contEnv) * (gate > 0.5 ? 0.0018 : 0.004);
         if (this.contEnv > 0.001) {
           const n = this.nextRand();
-          this.noiseLp += (0.12 + bright * 0.72) * (n - this.noiseLp);
-          exc += this.noiseLp * this.contEnv * vel * 0.055;
+          this.noiseLp += (0.10 + bright * 0.45) * (n - this.noiseLp);
+          exc += this.noiseLp * this.contEnv * vel * 0.045;
         }
       } else if (this.strikeSamples > 0) {
         const phase = 1 - this.strikeSamples / Math.max(1, this.strikeTotal);
         const win = Math.sin(phase * Math.PI);
+        const n = this.nextRand();
+        this.noiseLp += (0.12 + bright * 0.42) * (n - this.noiseLp);
+        const strikeNorm = Math.min(1.5, 22 / Math.max(10, this.strikeTotal));
         if (excType === 1) {
-          // Plucked transient
-          const n = this.nextRand();
-          this.noiseLp += (0.2 + bright * 0.75) * (n - this.noiseLp);
-          exc += (win * 0.35 + this.noiseLp * 0.65 * win) * vel * 0.36;
+          exc += (win * 0.68 + this.noiseLp * 0.32 * win) * strikeNorm * vel * 0.34;
         } else {
-          // Struck mallet impulse
-          const n = this.nextRand();
-          this.noiseLp += (0.15 + bright * 0.65) * (n - this.noiseLp);
-          exc += (win * 0.72 + this.noiseLp * 0.28 * win) * vel * 0.42;
+          exc += (win * 0.85 + this.noiseLp * 0.15 * win) * strikeNorm * vel * 0.36;
         }
         this.strikeSamples--;
       }
@@ -158,18 +161,20 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
         }
 
         const omega = (6.28318530718 * modeFreq) / sampleRate;
-        // High modes decay faster proportional to damping
         const modeDecay = Math.max(0.03, decaySec / (1 + m * damping * 1.45));
         const releaseMul = gate > 0.5 ? 1.0 : (excType === 2 ? 0.35 : 0.92);
         const r = Math.min(0.99992, Math.max(0.85, Math.exp(-3.0 / (modeDecay * releaseMul * sampleRate))));
         const a1 = -2.0 * r * Math.cos(omega);
         const a2 = r * r;
 
-        const gainWeight = ampRow[m] * Math.pow(bright, m * 0.42) * (1 - r);
-        const y0 = gainWeight * 22.0 * xDiff - a1 * this.y1[m] - a2 * this.y2[m];
+        const modeBright = Math.pow(bright, m * 0.48);
+        const gainWeight = excType === 2
+          ? ampRow[m] * modeBright * Math.sqrt(Math.max(0.00001, 1 - r)) * 8.5
+          : ampRow[m] * modeBright * 0.11;
+        const y0 = gainWeight * xDiff - a1 * this.y1[m] - a2 * this.y2[m];
         if (Number.isFinite(y0)) {
           this.y2[m] = this.y1[m];
-          this.y1[m] = Math.max(-4.0, Math.min(4.0, y0));
+          this.y1[m] = Math.max(-2.5, Math.min(2.5, y0));
           sum += this.y1[m];
         } else {
           this.y1[m] = 0;
@@ -177,7 +182,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
         }
       }
 
-      ch[i] = this.clamp(Math.tanh(sum * 0.85), -1.2, 1.2, 0);
+      ch[i] = this.clamp(Math.tanh(sum * 0.90), -1.2, 1.2, 0);
     }
 
     return true;
@@ -191,7 +196,7 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
       { name: 'boreType', defaultValue: 0, minValue: 0, maxValue: 3, automationRate: 'k-rate' },
       { name: 'breathPressure', defaultValue: 0.65, minValue: 0.05, maxValue: 1.25, automationRate: 'a-rate' },
       { name: 'embouchure', defaultValue: 0.55, minValue: 0.05, maxValue: 1.0, automationRate: 'k-rate' },
-      { name: 'breathNoise', defaultValue: 0.25, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+      { name: 'breathNoise', defaultValue: 0.20, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
       { name: 'damping', defaultValue: 0.38, minValue: 0.05, maxValue: 0.95, automationRate: 'k-rate' },
       { name: 'overblow', defaultValue: 0.0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
       { name: 'exciterMix', defaultValue: 0.5, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
@@ -208,11 +213,16 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
     this.writeIdx = 0;
     this.jetIdx = 0;
     this.lpState = 0;
+    this.lpState2 = 0;
+    this.hpIn = 0;
+    this.hpOut = 0;
     this.noiseLp = 0;
     this.dcIn = 0;
     this.dcOut = 0;
     this.breathEnv = 0;
     this.chiffEnv = 0;
+    this.seedSamples = 0;
+    this.seedTotal = 128;
     this.lastTriggered = false;
     this.seed = 2741;
     this.stopped = false;
@@ -253,7 +263,7 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
     const pressArr = parameters.breathPressure;
     const boreType = Math.round(this.clamp(parameters.boreType[0], 0, 3, 0));
     const embouchure = this.clamp(parameters.embouchure[0], 0.05, 1.0, 0.55);
-    const breathNoise = this.clamp(parameters.breathNoise[0], 0, 1, 0.25);
+    const breathNoise = this.clamp(parameters.breathNoise[0], 0, 1, 0.20);
     const damping = this.clamp(parameters.damping[0], 0.05, 0.95, 0.38);
     const overblow = this.clamp(parameters.overblow[0], 0, 1, 0);
     const excMix = this.clamp(parameters.exciterMix[0], 0, 1, 0.5);
@@ -263,69 +273,107 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
     if (gate > 0.5 && !this.lastTriggered) {
       this.lastTriggered = true;
       this.chiffEnv = 1.0;
+      const f0 = this.clamp(freqArr[0], 25, 4000, 220);
+      this.seedTotal = Math.max(16, Math.round(sampleRate / f0));
+      this.seedSamples = this.seedTotal;
     } else if (gate < 0.5) {
       this.lastTriggered = false;
     }
 
-    const lpAlpha = Math.max(0.08, 1 - damping * 0.72);
+    const isClarinet = boreType === 1;
+    const isReed = boreType === 2;
+    const isOrgan = boreType === 3;
 
     for (let i = 0; i < ch.length; i++) {
       const freq = this.clamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 25, 4000, 220);
       const pressKnob = this.clamp(pressArr.length > 1 ? pressArr[i] : pressArr[0], 0.05, 1.25, 0.65);
 
       const targetEnv = gate > 0.5 ? 1.0 : 0.0;
-      const envSpeed = gate > 0.5 ? (boreType === 3 ? 0.0025 : 0.0014) : 0.0028;
+      const envSpeed = gate > 0.5 ? (isOrgan ? 0.0042 : 0.0034) : 0.0038;
       this.breathEnv += (targetEnv - this.breathEnv) * envSpeed;
-      this.chiffEnv *= 0.9965;
+      this.chiffEnv *= 0.9988;
 
       const rawN = this.nextRand();
-      this.noiseLp += (0.28 + embouchure * 0.45) * (rawN - this.noiseLp);
-      const extSample = ext && Number.isFinite(ext[i]) ? Math.max(-2, Math.min(2, ext[i])) * excMix * 0.3 : 0;
+      this.noiseLp += (0.18 + embouchure * 0.32) * (rawN - this.noiseLp);
+      const extSample = ext && Number.isFinite(ext[i]) ? Math.max(-2, Math.min(2, ext[i])) * excMix * 0.25 : 0;
 
-      // Closed-open cylindrical bore (clarinet) runs at half-period with inverting (-1) round-trip reflection -> odd harmonics at f0
-      // Open-open / conical bores (flute, double reed, organ pipe) run at full-period with positive (+1) round-trip reflection -> all harmonics at f0
-      const isClarinet = boreType === 1;
-      const boreDelay = isClarinet
-        ? Math.max(4, sampleRate / (freq * 2.0) - 0.5)
-        : Math.max(4, sampleRate / freq - 0.5);
+      // Symmetrical pitch-adaptive loop bandpass:
+      // Flute/Organ use wider passband (0.28*f..3.4*f) so edge-tone jet gets >1.12 loop gain while rejecting DC/rumble & high modes.
+      const isJetMode = boreType === 0 || isOrgan;
+      const hpCut = Math.max(12, freq * (isJetMode ? 0.28 : 0.42));
+      const hpPole = Math.exp((-6.2831853 * hpCut) / sampleRate);
+      const hpGain = 0.5 * (1 + hpPole);
+      const lpCut = Math.min(sampleRate * 0.38, freq * (isClarinet ? 4.8 + (1 - damping) * 4.2 : isJetMode ? 3.4 : 2.38));
+      const lpAlpha = Math.max(0.05, Math.min(0.88, 1 - Math.exp((-6.2831853 * lpCut) / sampleRate)));
+      const oneMinusA = 1 - lpAlpha;
+
+      const w = (6.28318530718 * freq) / sampleRate;
+      const lpLag = w > 0.0005
+        ? Math.atan2(oneMinusA * Math.sin(w), 1 - oneMinusA * Math.cos(w)) / w
+        : oneMinusA / lpAlpha;
+      const hpLead = isClarinet || w <= 0.0005
+        ? 0
+        : (Math.atan2(Math.sin(w), 1 - Math.cos(w)) - Math.atan2(hpPole * Math.sin(w), 1 - hpPole * Math.cos(w))) / w;
+
+      const rawPeriod = isClarinet ? sampleRate / (freq * 2.0) : sampleRate / freq;
+      const jetComp = isJetMode ? rawPeriod * 0.002 : 0;
+      const boreDelay = Math.max(2.0, Math.min(this.maxDelay - 4, rawPeriod - lpLag + hpLead + jetComp));
 
       const boreDelayed = this.readFrac(this.bore, this.maxDelay, this.writeIdx, boreDelay);
       this.lpState = this.lpState + lpAlpha * (boreDelayed - this.lpState);
 
-      const reflectSign = isClarinet ? -0.92 : 0.90;
-      const reflected = this.lpState * reflectSign;
+      const pressure = (pressKnob * (0.55 + vel * 0.45) + this.chiffEnv * 0.12) * this.breathEnv;
+      const turb = this.noiseLp * breathNoise * (0.015 + this.chiffEnv * 0.14 + pressKnob * 0.02) * this.breathEnv;
 
-      const pressure = (pressKnob * (0.45 + vel * 0.55) + this.chiffEnv * 0.16) * this.breathEnv;
-      const turb = this.noiseLp * breathNoise * (0.08 + this.chiffEnv * 0.22 + pressKnob * 0.08) * this.breathEnv;
+      let initSeed = 0;
+      if (this.seedSamples > 0) {
+        const sPhase = 1 - this.seedSamples / Math.max(1, this.seedTotal);
+        initSeed = Math.sin(6.2831853 * sPhase) * 0.24 * vel;
+        this.seedSamples--;
+      }
 
       let boreIn = 0;
       let outRaw = 0;
 
-      if (boreType === 0 || boreType === 3) {
-        // Flute / Organ Pipe air-jet nonlinear edge model
-        const jetRatio = boreType === 3 ? 0.24 : 0.34 * (0.65 + (1 - embouchure) * 0.55) * (1 - overblow * 0.45);
+      if (isJetMode) {
+        // Flute / Organ Pipe: DC-free bandpass air column + soft edge-tone jet
+        const hpY = hpGain * (this.lpState - this.hpIn) + hpPole * this.hpOut;
+        this.hpIn = this.lpState;
+        this.hpOut = hpY;
+
+        const jetRatio = isOrgan
+          ? 0.46
+          : 0.48 * (1 - overblow * 0.45);
         const jetDelay = Math.max(2, Math.min(1800, boreDelay * jetRatio));
-        const jetDrive = pressure * 0.55 - reflected * 0.62 + turb + extSample;
+        const jetDrive = pressure * 0.42 - hpY * 0.72 + turb + extSample;
         this.jet[this.jetIdx] = this.clamp(jetDrive, -1.5, 1.5, 0);
         const jetOut = this.readFrac(this.jet, 2048, this.jetIdx, jetDelay);
         this.jetIdx = (this.jetIdx + 1) % 2048;
 
-        // Edge-tone sigmoid cubic nonlinearity: x - x^3
-        const x = this.clamp(jetOut * (1.25 + overblow * 0.85), -1.5, 1.5, 0);
-        const jetNl = Math.tanh(x - 0.33 * x * x * x) * (boreType === 3 ? 0.52 : 0.72);
-        boreIn = reflected * (0.78 + (1 - damping) * 0.15) + jetNl * 0.38 + turb * 0.7;
-        outRaw = this.lpState * 0.72 + jetNl * 0.24 + turb * 0.32;
+        const x = this.clamp(jetOut * (1.28 + overblow * 0.65), -1.6, 1.6, 0);
+        const jetNl = x - 0.33 * x * x * x;
+        boreIn = hpY * 0.90 + jetNl * (0.36 + pressure * 0.14) * this.breathEnv + initSeed + turb * 0.16;
+        outRaw = hpY * 0.62 + turb * 0.09;
+      } else if (isClarinet) {
+        // Cylindrical bore (half-wavelength inverted reflection): woody odd-harmonic clarinet tone
+        const reflected = -this.lpState;
+        const reedNl = Math.tanh(reflected * (1.25 + embouchure * 0.65));
+        boreIn = reflected * 0.78 + reedNl * (0.28 + 0.12 * pressKnob) * this.breathEnv + initSeed * 0.5 + turb * 0.14 + extSample;
+        const postCut = Math.max(0.08, Math.min(0.76, 1 - Math.exp((-6.2831853 * Math.min(sampleRate * 0.35, freq * (3.6 + (1 - damping) * 4.2))) / sampleRate)));
+        this.lpState2 += postCut * (this.lpState - this.lpState2);
+        outRaw = this.lpState2 * 0.72 + turb * 0.06;
       } else {
-        // Clarinet / Double-Reed pressure-controlled valve model
-        const diff = pressure - reflected;
-        const stiffness = boreType === 2 ? 1.15 + embouchure * 0.9 : 0.75 + embouchure * 0.65;
-        let valve = 0.78 - stiffness * Math.abs(diff);
-        if (valve < 0) valve = 0;
-        if (valve > 1) valve = 1;
-        // Asymmetric reed saturation for double-reed oboe/duduk bite
-        const asym = boreType === 2 ? Math.tanh((diff + 0.12) * 1.8) * 0.22 : 0;
-        boreIn = pressure * valve * 0.58 + reflected * (0.66 + valve * 0.24) + asym + turb + extSample;
-        outRaw = this.lpState * 0.8 + boreIn * 0.2 + turb * 0.2;
+        // Conical double-reed bore: bandpass fundamental loop + post-loop asymmetric reed shaping (even + odd harmonics)
+        const hpY = hpGain * (this.lpState - this.hpIn) + hpPole * this.hpOut;
+        this.hpIn = this.lpState;
+        this.hpOut = hpY;
+
+        boreIn = hpY * 0.84 + Math.tanh(hpY * 1.55) * (0.30 + 0.12 * pressKnob) * this.breathEnv + initSeed + turb * 0.12 + extSample;
+        const drive = hpY * (0.95 + embouchure * 0.65);
+        const asym = Math.tanh(drive) + 0.28 * drive * drive;
+        const postCut = Math.max(0.08, Math.min(0.80, 1 - Math.exp((-6.2831853 * Math.min(sampleRate * 0.36, freq * (3.5 + (1 - damping) * 4.5))) / sampleRate)));
+        this.lpState2 += postCut * (asym - this.lpState2);
+        outRaw = this.lpState2 * 0.58 + turb * 0.06;
       }
 
       this.bore[this.writeIdx] = this.clamp(boreIn, -1.4, 1.4, 0);
@@ -335,11 +383,14 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
       if (Number.isFinite(dcBlocked)) {
         this.dcIn = outRaw;
         this.dcOut = dcBlocked;
-        ch[i] = this.clamp(Math.tanh(dcBlocked * 1.15), -1.2, 1.2, 0);
+        ch[i] = this.clamp(Math.tanh(dcBlocked * 0.85), -1.2, 1.2, 0);
       } else {
         this.dcIn = 0;
         this.dcOut = 0;
         this.lpState = 0;
+        this.lpState2 = 0;
+        this.hpIn = 0;
+        this.hpOut = 0;
         ch[i] = 0;
       }
     }

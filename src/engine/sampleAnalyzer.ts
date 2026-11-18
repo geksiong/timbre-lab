@@ -230,37 +230,58 @@ export function autoIsolateNoteBounds(buffer: AudioBuffer): {
     };
   }
 
-  // Walk backward from peak to locate onset
-  const onsetThresh = peakRms * 0.075;
+  // Smooth RMS lightly (3-frame moving average) so single-cycle ripples don't trigger false bounds
+  const smooth = new Float32Array(numFrames);
+  for (let f = 0; f < numFrames; f++) {
+    const a = rms[Math.max(0, f - 1)];
+    const b = rms[f];
+    const c = rms[Math.min(numFrames - 1, f + 1)];
+    smooth[f] = (a + b + c) / 3;
+  }
+
+  // Walk backward from global peak to locate the start of this specific note (stop at silence OR preceding valley)
+  const onsetThresh = peakRms * 0.08;
   let startFrame = peakIdx;
-  while (startFrame > 0 && rms[startFrame] > onsetThresh) {
+  let minBack = smooth[peakIdx];
+  const minHoldBack = Math.max(4, Math.floor((0.06 * sr) / hop));
+  while (startFrame > 0 && smooth[startFrame] > onsetThresh) {
+    if (smooth[startFrame] < minBack) {
+      minBack = smooth[startFrame];
+    } else if (
+      peakIdx - startFrame > minHoldBack &&
+      minBack < peakRms * 0.45 &&
+      smooth[startFrame] > minBack * 1.65
+    ) {
+      // Preceding note energy detected before valley; stop right in the valley
+      startFrame++;
+      break;
+    }
     startFrame--;
   }
-  // Check for steep jump slightly before peak in case of slow pad
   const preRollSec = 0.015;
   const startSec = Math.max(0, (startFrame * hop) / sr - preRollSec);
 
-  // Walk forward from peak to locate natural tail end (or next major re-onset)
-  const tailThresh = peakRms * 0.02;
-  const maxFrames = Math.floor((4.2 * sr) / hop);
+  // Walk forward from peak to locate natural tail end (or next note re-onset)
+  const tailThresh = peakRms * 0.025;
+  const maxFrames = Math.floor((3.4 * sr) / hop);
   let endFrame = Math.min(numFrames - 1, peakIdx + maxFrames);
   let silentCount = 0;
-  let minSincePeak = peakRms;
+  let minSincePeak = smooth[peakIdx];
+  const minReonsetFrames = Math.floor((0.18 * sr) / hop);
   for (let f = peakIdx + 2; f < Math.min(numFrames, peakIdx + maxFrames); f++) {
-    if (rms[f] < minSincePeak) {
-      minSincePeak = rms[f];
+    if (smooth[f] < minSincePeak) {
+      minSincePeak = smooth[f];
     }
-    // If a distinct second note spike occurs well after decay, stop before it
+    // Stop before a distinct next-note pluck/re-attack (sensitive enough for legato/overlapping notes)
     if (
-      f - peakIdx > Math.floor(0.25 * sr / hop) &&
-      minSincePeak < peakRms * 0.22 &&
-      rms[f] > minSincePeak * 3.4 &&
-      rms[f] > peakRms * 0.35
+      f - peakIdx > minReonsetFrames &&
+      ((minSincePeak < peakRms * 0.35 && smooth[f] > minSincePeak * 2.2 && smooth[f] > peakRms * 0.25) ||
+        (minSincePeak < peakRms * 0.68 && smooth[f] > minSincePeak * 1.75 && f - peakIdx > Math.floor((0.35 * sr) / hop)))
     ) {
-      endFrame = Math.max(peakIdx + 4, f - 2);
+      endFrame = Math.max(peakIdx + 6, f - 2);
       break;
     }
-    if (rms[f] < tailThresh) {
+    if (smooth[f] < tailThresh) {
       silentCount++;
       if (silentCount >= 8) {
         endFrame = f;
@@ -553,26 +574,64 @@ function extractAdsr(
     }
   }
 
-  // Attack: from 6% of peak to 90% of peak
-  let startAttIdx = 0;
+  // Measure true initial onset attack rather than a later expressive crescendo peak:
+  // Track 10%, 50%, and 85% thresholds from initial note start.
+  let idx10 = 0;
   for (let f = 0; f <= peakIdx; f++) {
-    if (env[f] >= peakRms * 0.06) {
-      startAttIdx = f;
+    if (env[f] >= peakRms * 0.08) {
+      idx10 = f;
       break;
     }
   }
-  let endAttIdx = peakIdx;
-  for (let f = startAttIdx; f <= peakIdx; f++) {
-    if (env[f] >= peakRms * 0.9) {
-      endAttIdx = f;
+  let idx50 = peakIdx;
+  for (let f = idx10; f <= peakIdx; f++) {
+    if (env[f] >= peakRms * 0.5) {
+      idx50 = f;
       break;
     }
   }
-  const attackSec = clamp(((endAttIdx - startAttIdx) * hop) / sampleRate, 0.004, 3.5);
+  let idx85 = peakIdx;
+  for (let f = idx10; f <= peakIdx; f++) {
+    if (env[f] >= peakRms * 0.82) {
+      idx85 = f;
+      break;
+    }
+  }
 
-  const remFrames = Math.max(1, numFrames - peakIdx);
-  const midStart = peakIdx + Math.floor(remFrames * 0.28);
-  const midEnd = Math.min(numFrames, peakIdx + Math.floor(remFrames * 0.65));
+  // Also detect an initial local plateau/peak within first 0.55s in case global max occurs later during swell
+  const earlyCapIdx = Math.min(numFrames - 1, idx10 + Math.floor((0.55 * sampleRate) / hop));
+  let initPeakIdx = idx85;
+  for (let f = idx50; f <= earlyCapIdx; f++) {
+    if (env[f] >= peakRms * 0.55) {
+      const ahead = env[Math.min(numFrames - 1, f + 4)];
+      const prev = env[Math.max(0, f - 2)];
+      if (env[f] >= prev && ahead <= env[f] * 1.03) {
+        initPeakIdx = f;
+        break;
+      }
+    }
+  }
+
+  const rise10to50 = ((idx50 - idx10) * hop) / sampleRate;
+  const rise10to85 = ((idx85 - idx10) * hop) / sampleRate;
+  // If 10%->50% rises cleanly (<160ms) while 85% peak arrives much later due to expressive swell, use initial onset
+  const effectivePeakIdx =
+    rise10to50 < 0.16 && rise10to85 > Math.max(0.26, rise10to50 * 3.2)
+      ? Math.max(idx50 + 2, Math.min(initPeakIdx, idx85))
+      : idx85;
+
+  const attackSec = clamp(
+    rise10to50 < 0.16 && rise10to85 > Math.max(0.26, rise10to50 * 3.2)
+      ? Math.max(rise10to50 * 1.85, ((effectivePeakIdx - idx10) * hop) / sampleRate)
+      : rise10to85,
+    0.004,
+    3.5
+  );
+
+  const anchorIdx = Math.min(peakIdx, effectivePeakIdx);
+  const remFrames = Math.max(1, numFrames - anchorIdx);
+  const midStart = anchorIdx + Math.floor(remFrames * 0.22);
+  const midEnd = Math.min(numFrames, anchorIdx + Math.floor(remFrames * 0.68));
   let midSum = 0;
   for (let f = midStart; f < midEnd; f++) {
     midSum += env[f];
@@ -583,13 +642,13 @@ function extractAdsr(
   // Decay time: peak down to sustain plateau (or -18 dB if percussive)
   const targetDec = rawSustain > 0.18 ? rawSustain * peakRms * 1.15 : peakRms * 0.14;
   let decEndIdx = midStart;
-  for (let f = peakIdx + 1; f < numFrames; f++) {
+  for (let f = anchorIdx + 1; f < numFrames; f++) {
     if (env[f] <= targetDec) {
       decEndIdx = f;
       break;
     }
   }
-  const decaySec = clamp(((decEndIdx - peakIdx) * hop) / sampleRate, 0.04, 4.5);
+  const decaySec = clamp(((decEndIdx - anchorIdx) * hop) / sampleRate, 0.04, 4.5);
 
   // Release: slope in final 25% of note
   const tailStart = Math.floor(numFrames * 0.72);
@@ -679,25 +738,40 @@ function classifyArchetype(
   profile: Omit<AcousticAnalysisProfile, 'detectedArchetype'>
 ): ResolvedArchetype {
   // 1. High inharmonicity -> FM Bell / Mallet / Metallic percussion
-  if (profile.inharmonicity > 0.16 && profile.attackSec < 0.09) {
+  if (
+    (profile.inharmonicity > 0.135 && profile.attackSec < 0.05 && profile.sustainLevel < 0.36) ||
+    (profile.inharmonicity > 0.26 && profile.attackSec < 0.06)
+  ) {
     return 'fmBell';
   }
-  // 2. Slow swell attack + wide stereo or sustained pad -> Ensemble Pad
-  if (profile.attackSec >= 0.24 && profile.sustainLevel >= 0.45) {
+  // 2. Genuine slow pad bloom (avoid classifying dry/mono acoustic winds or bowed phrases as stereo pads)
+  if (
+    profile.sustainLevel >= 0.42 &&
+    ((profile.attackSec >= 0.38 && profile.noiseRatio < 0.24) ||
+      (profile.attackSec >= 0.22 && profile.stereoWidth > 0.26))
+  ) {
     return 'ensemblePad';
   }
   // 3. Fast attack + decaying non-sustained envelope -> Physical Plucked / Struck
-  if (profile.attackSec < 0.065 && profile.sustainLevel < 0.26) {
+  if (profile.attackSec < 0.065 && profile.sustainLevel < 0.28) {
     return profile.inharmonicity > 0.22 ? 'fmBell' : 'physicalPluck';
   }
-  // 4. Sustained expressive with vibrato or warm mid-high string harmonics -> Bowed Physical
+  // 4. Hollow / flute / breath-rich odd-harmonic sustained winds -> Wind / Formant
   if (
-    profile.sustainLevel >= 0.3 &&
-    (profile.vibratoDepthCents >= 5 || (profile.oddEvenRatio < 0.62 && profile.attackSec >= 0.045))
+    profile.sustainLevel >= 0.28 &&
+    (profile.oddEvenRatio >= 0.62 || (profile.noiseRatio >= 0.26 && profile.oddEvenRatio >= 0.5))
+  ) {
+    return 'windFormant';
+  }
+  // 5. Bowed strings: sustained even+odd harmonic body with slower bow onset or expressive vibrato
+  if (
+    profile.sustainLevel >= 0.28 &&
+    profile.oddEvenRatio < 0.6 &&
+    (profile.vibratoDepthCents >= 8 || profile.attackSec >= 0.045)
   ) {
     return 'physicalBowed';
   }
-  // 5. Wind / Reed / Brass Formant Oscillator
+  // 6. Wind / Reed / Brass default
   return 'windFormant';
 }
 
@@ -792,11 +866,11 @@ export function analyzeAudioSample(
     const ratio = pk.hz / pitch.fundamentalHz;
     if (ratio < 0.75) continue;
     const nearestInt = Math.max(1, Math.round(ratio));
-    const fracDev = Math.abs(ratio - nearestInt) / nearestInt;
+    const fracDev = Math.abs(ratio - nearestInt) / Math.sqrt(nearestInt);
     inharmWeightSum += fracDev * pk.mag;
     inharmMagSum += pk.mag;
   }
-  const inharmonicity = inharmMagSum > 1e-8 ? clamp((inharmWeightSum / inharmMagSum) * 2.2, 0, 1) : 0.08;
+  const inharmonicity = inharmMagSum > 1e-8 ? clamp((inharmWeightSum / inharmMagSum) * 2.8, 0, 1) : 0.08;
 
   // Spectral flatness above 400 Hz as noise proxy
   const flatStart = Math.max(4, Math.floor((400 / nyquist) * fullMag.length));
@@ -855,10 +929,12 @@ export function analyzeAudioSample(
 function chooseOscWaveform(profile: AcousticAnalysisProfile): string {
   const h2 = profile.harmonicAmps[1] ?? 0;
   const h3 = profile.harmonicAmps[2] ?? 0;
-  const highSum = profile.harmonicAmps.slice(5).reduce((a, b) => a + b, 0);
+  const highSum = profile.harmonicAmps.slice(4).reduce((a, b) => a + b, 0);
 
-  if (highSum < 0.28 && h2 < 0.25 && h3 < 0.2) return 'sine';
-  if (highSum < 0.45 && profile.oddEvenRatio > 0.65) return 'triangle';
+  if ((highSum < 0.28 && h2 < 0.28 && h3 < 0.22) || (profile.spectralCentroidHz < 720 && profile.oddEvenRatio > 0.72)) {
+    return 'sine';
+  }
+  if (highSum < 0.48 && profile.oddEvenRatio > 0.65) return 'triangle';
   if (profile.oddEvenRatio > 0.68 && h3 > 0.35) return 'hollow';
   if (profile.oddEvenRatio > 0.56) return 'reed';
   if (profile.spectralCentroidHz > 1900) return 'sawtooth';
@@ -942,16 +1018,16 @@ function buildArchetypePatch(
   if (archetype === 'physicalPluck') {
     const str = createDefaultNode('physicalString', 'str1', { x: 48, y: 72 });
     str.label = 'Plucked Resonator';
-    const isHammer = profile.attackSec >= 0.018 && profile.spectralCentroidHz < 1600;
-    const damp = clamp(1 - profile.spectralCentroidHz / 5400, 0.14, 0.85);
-    const decayParam = clamp(0.955 + Math.min(0.038, profile.decaySec * 0.015), 0.92, 0.994);
+    const isHammer = profile.attackSec >= 0.018 && profile.spectralCentroidHz < 1200 && profile.sustainLevel > 0.16;
+    const damp = clamp(0.76 - profile.spectralCentroidHz / 5200, 0.18, 0.7);
+    const decayParam = clamp(0.962 + Math.min(0.03, profile.decaySec * 0.016), 0.94, 0.992);
     str.params = {
       ...str.params,
       excitation: isHammer ? 'hammer' : 'pluck',
       damping: Number(damp.toFixed(2)),
       decay: Number(decayParam.toFixed(3)),
-      brightness: Number(clamp(profile.spectralCentroidHz / 3800, 0.25, 0.96).toFixed(2)),
-      sympathetic: profile.inharmonicity > 0.11 ? 0.12 : 0.02,
+      brightness: Number(clamp(profile.spectralCentroidHz / 3200, 0.34, 0.94).toFixed(2)),
+      sympathetic: profile.inharmonicity > 0.14 ? 0.1 : 0.03,
       exciterMix: 0.55,
       gain: 0.92,
     };
@@ -962,15 +1038,16 @@ function buildArchetypePatch(
       color: profile.spectralCentroidHz > 2000 ? 'white' : 'pink',
       tone: Math.round(clamp(profile.spectralCentroidHz * 1.4, 800, 6500)),
       q: 1.6,
-      gain: Number(clamp(0.08 + profile.noiseRatio * 0.35, 0.06, 0.36).toFixed(2)),
+      gain: Number(clamp(0.07 + profile.noiseRatio * 0.25, 0.05, 0.28).toFixed(2)),
     };
 
     const comb = createDefaultNode('combFilter', 'comb1', { x: 320, y: 96 });
     comb.label = 'Body Cavity Comb';
     comb.params = {
       ...comb.params,
-      mode: 'feedback',
-      keyTrack: false,
+      mode: 'feedforward',
+      keyTrack: true,
+      ratio: 0.18,
       delayMs: Number(clamp(1000 / Math.max(120, f1.freqHz), 1.4, 12).toFixed(1)),
       feedback: 0.36,
       damping: 0.52,
@@ -979,12 +1056,12 @@ function buildArchetypePatch(
 
     nodes.push(str, noise, comb, eq, flt, env, rev, out);
     connections.push(
-      { id: 'c1', fromNode: 'nz1', fromPort: 'out', toNode: 'str1', toPort: 'exciter', amount: 0.45 },
+      { id: 'c1', fromNode: 'nz1', fromPort: 'out', toNode: 'str1', toPort: 'exciter', amount: 0.4 },
       { id: 'c2', fromNode: 'str1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 1.0 },
       { id: 'c3', fromNode: 'comb1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
       { id: 'c4', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
       { id: 'c5', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
-      { id: 'c6', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: Number(clamp(0.18 + (profile.attackBrightnessRatio - 1) * 0.22, 0.1, 0.55).toFixed(2)) },
+      { id: 'c6', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: Number(clamp(0.18 + (profile.attackBrightnessRatio - 1) * 0.22, 0.1, 0.5).toFixed(2)) },
       { id: 'c7', fromNode: 'env1', fromPort: 'out', toNode: 'rev1', toPort: 'in', amount: 1.0 },
       { id: 'c8', fromNode: 'rev1', fromPort: 'out', toNode: 'out1', toPort: 'in', amount: 1.0 }
     );
@@ -999,41 +1076,51 @@ function buildArchetypePatch(
       `Acoustic cavity Comb Filter (${comb.params.delayMs} ms) + 4-band Parametric EQ locked onto body resonances at ${f1.freqHz} Hz and ${f2.freqHz} Hz.`
     );
   } else if (archetype === 'physicalBowed') {
-    const str = createDefaultNode('physicalString', 'str1', { x: 48, y: 64 });
+    const str = createDefaultNode('physicalString', 'str1', { x: 48, y: 56 });
     str.label = 'Bowed String';
     str.params = {
       ...str.params,
       excitation: 'bow',
-      bowPressure: Number(clamp(0.42 + profile.spectralCentroidHz / 6500, 0.38, 0.84).toFixed(2)),
-      bowPosition: 0.14,
-      rosin: Number(clamp(0.18 + profile.noiseRatio * 0.65, 0.14, 0.65).toFixed(2)),
-      damping: Number(clamp(1 - profile.spectralCentroidHz / 5800, 0.2, 0.72).toFixed(2)),
-      decay: 0.985,
-      brightness: Number(clamp(profile.spectralCentroidHz / 3500, 0.4, 0.92).toFixed(2)),
-      gain: 0.88,
+      bowPressure: Number(clamp(0.42 + profile.spectralCentroidHz / 7500, 0.4, 0.72).toFixed(2)),
+      bowPosition: 0.15,
+      rosin: Number(clamp(0.12 + profile.noiseRatio * 0.28, 0.12, 0.3).toFixed(2)),
+      damping: Number(clamp(0.68 - profile.spectralCentroidHz / 6500, 0.22, 0.66).toFixed(2)),
+      decay: 0.986,
+      brightness: Number(clamp(profile.spectralCentroidHz / 3200, 0.42, 0.88).toFixed(2)),
+      gain: 0.68,
     };
 
-    const fm = createDefaultNode('fmOperator', 'fm1', { x: 48, y: 276 });
-    fm.label = 'Rosin & Harmonics';
+    const osc = createDefaultNode('oscillator', 'osc1', { x: 48, y: 248 });
+    osc.label = 'Warm Bowed Core';
+    osc.params = {
+      ...osc.params,
+      waveform: 'strings',
+      detune: 3,
+      unison: '1',
+      gain: 0.44,
+    };
+
+    const fm = createDefaultNode('fmOperator', 'fm1', { x: 48, y: 432 });
+    fm.label = 'Rosin Articulation';
     fm.params = {
       ...fm.params,
-      carrierWave: 'triangle',
+      carrierWave: 'sine',
       modWave: 'sine',
       ratio: 1.0,
-      modIndex: Math.round(clamp(profile.spectralCentroidHz * 0.06, 45, 210)),
-      feedback: 0.14,
-      noiseFmDepth: Math.round(clamp(70 + profile.noiseRatio * 260, 60, 260)),
-      noiseBandwidth: Math.round(clamp(f2.freqHz, 1200, 4200)),
-      gain: 0.3,
+      modIndex: Math.round(clamp(22 + profile.spectralCentroidHz * 0.02, 24, 65)),
+      feedback: 0.06,
+      noiseFmDepth: Math.round(clamp(40 + profile.noiseRatio * 140, 42, 95)),
+      noiseBandwidth: Math.round(clamp(f2.freqHz, 1200, 3600)),
+      gain: 0.18,
     };
 
-    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: 488 });
+    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: 616 });
     lfo.label = 'Expression Vibrato';
     lfo.params = {
       waveform: 'sine',
       rate: Number(profile.vibratoRateHz.toFixed(2)),
-      depth: Number(clamp(0.08 + profile.vibratoDepthCents / 90, 0.08, 0.38).toFixed(2)),
-      delay: Number(clamp(profile.attackSec * 1.1, 0.08, 0.45).toFixed(2)),
+      depth: Number(clamp(0.1 + profile.vibratoDepthCents / 140, 0.1, 0.36).toFixed(2)),
+      delay: Number(clamp(profile.attackSec * 1.1, 0.08, 0.38).toFixed(2)),
     };
 
     const comb = createDefaultNode('combFilter', 'comb1', { x: 320, y: 96 });
@@ -1043,31 +1130,33 @@ function buildArchetypePatch(
       mode: 'feedforward',
       keyTrack: true,
       ratio: 0.14,
-      feedback: 0.42,
-      damping: 0.42,
-      mix: 0.4,
+      feedback: 0.4,
+      damping: 0.46,
+      mix: 0.34,
     };
 
-    nodes.push(str, fm, lfo, comb, eq, flt, env, rev, out);
+    nodes.push(str, osc, fm, lfo, comb, eq, flt, env, rev, out);
     connections.push(
       { id: 'c1', fromNode: 'str1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 1.0 },
-      { id: 'c2', fromNode: 'fm1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.48 },
-      { id: 'c3', fromNode: 'lfo1', fromPort: 'cv', toNode: 'str1', toPort: 'pitch', amount: 0.14 },
-      { id: 'c4', fromNode: 'comb1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
-      { id: 'c5', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
-      { id: 'c6', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
-      { id: 'c7', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: 0.3 },
-      { id: 'c8', fromNode: 'env1', fromPort: 'out', toNode: 'rev1', toPort: 'in', amount: 1.0 },
-      { id: 'c9', fromNode: 'rev1', fromPort: 'out', toNode: 'out1', toPort: 'in', amount: 1.0 }
+      { id: 'c2', fromNode: 'osc1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.8 },
+      { id: 'c3', fromNode: 'fm1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.42 },
+      { id: 'c4', fromNode: 'lfo1', fromPort: 'cv', toNode: 'str1', toPort: 'pitch', amount: 0.18 },
+      { id: 'c5', fromNode: 'lfo1', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: 0.18 },
+      { id: 'c6', fromNode: 'comb1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
+      { id: 'c7', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
+      { id: 'c8', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
+      { id: 'c9', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: 0.28 },
+      { id: 'c10', fromNode: 'env1', fromPort: 'out', toNode: 'rev1', toPort: 'in', amount: 1.0 },
+      { id: 'c11', fromNode: 'rev1', fromPort: 'out', toNode: 'out1', toPort: 'in', amount: 1.0 }
     );
     modMatrix.push(
-      { id: 'm1', enabled: true, source: 'velocity', via: 'none', targetNodeId: 'str1', targetParam: 'bowPressure', amount: 0.34, curve: 'linear', label: 'Velocity -> Bow Pressure' },
+      { id: 'm1', enabled: true, source: 'velocity', via: 'none', targetNodeId: 'str1', targetParam: 'bowPressure', amount: 0.28, curve: 'linear', label: 'Velocity -> Bow Pressure' },
       { id: 'm2', enabled: true, source: 'macroX', via: 'none', targetNodeId: 'flt1', targetParam: 'cutoff', amount: 0.42, curve: 'linear', label: 'Macro X -> Bow Brightness' },
       { id: 'm3', enabled: true, source: 'macroY', via: 'none', targetNodeId: 'lfo1', targetParam: 'depth', amount: 0.4, curve: 'linear', label: 'Macro Y -> Vibrato' }
     );
 
     notes.push(
-      `Stick-slip bowed waveguide layered with Noise-FM rosin excitation and ${lfo.params.rate} Hz vibrato LFO.`,
+      `Stick-slip bowed string layered with Warm Bowed oscillator, soft sine Noise-FM rosin, and ${lfo.params.rate} Hz vibrato LFO.`,
       `Feedforward bow-contact Comb Filter (1/7th bridge ratio) feeding Parametric EQ body formants at ${f1.freqHz} Hz and ${f2.freqHz} Hz.`
     );
   } else if (archetype === 'fmBell') {
@@ -1150,7 +1239,7 @@ function buildArchetypePatch(
     osc.label = 'Pad Ensemble';
     osc.params = {
       ...osc.params,
-      waveform: wave === 'sine' ? 'strings' : wave,
+      waveform: wave === 'sine' && profile.spectralCentroidHz > 900 ? 'strings' : wave,
       unison: profile.stereoWidth > 0.42 ? '5' : '3',
       unisonDetune: Math.round(clamp(10 + profile.stereoWidth * 24, 10, 32)),
       stereoSpread: Number(clamp(0.45 + profile.stereoWidth * 0.5, 0.45, 0.95).toFixed(2)),
@@ -1198,65 +1287,92 @@ function buildArchetypePatch(
       `Organic Wander LFO, Stereo Ensemble Chorus, and Hall Reverb tuned to ${Math.round(profile.stereoWidth * 100)}% stereo spread.`
     );
   } else {
-    // windFormant (flute, clarinet, reed, brass, synth lead)
+    // windFormant (flute, bamboo wind, clarinet, double reed, brass)
+    const isFluteOrHollow = profile.oddEvenRatio >= 0.62 || profile.spectralCentroidHz < 1100;
+    const h3 = profile.harmonicAmps[2] ?? 0;
+    const boreType = !isFluteOrHollow
+      ? 'reed'
+      : profile.oddEvenRatio >= 0.68 && h3 >= 0.32 && profile.spectralCentroidHz >= 750
+        ? 'clarinet'
+        : 'flute';
     const wave = chooseOscWaveform(profile);
-    const osc = createDefaultNode('oscillator', 'osc1', { x: 48, y: 72 });
+    const cleanWave =
+      boreType === 'flute'
+        ? wave === 'sawtooth' || wave === 'strings'
+          ? 'triangle'
+          : wave
+        : boreType === 'clarinet'
+          ? 'triangle'
+          : wave === 'sine'
+            ? 'reed'
+            : wave;
+
+    const pipe = createDefaultNode('blownPipe', 'pipe1', { x: 48, y: 56 });
+    pipe.label = boreType === 'flute' ? 'Air-Jet Bore' : boreType === 'clarinet' ? 'Cylindrical Bore' : 'Reed Bore';
+    pipe.params = {
+      ...pipe.params,
+      boreType,
+      breathPressure: Number(clamp(0.56 + profile.spectralCentroidHz / 9500, 0.56, 0.78).toFixed(2)),
+      embouchure: Number(clamp(0.45 + profile.spectralCentroidHz / 6500, 0.45, 0.72).toFixed(2)),
+      breathNoise: Number(clamp(0.05 + profile.noiseRatio * 0.34, 0.05, 0.18).toFixed(2)),
+      damping: Number(clamp(0.62 - profile.spectralCentroidHz / 7500, 0.28, 0.62).toFixed(2)),
+      overblow: boreType === 'flute' && profile.attackBrightnessRatio > 1.35 ? 0.06 : 0.0,
+      exciterMix: 0.45,
+      gain: 0.54,
+    };
+
+    const osc = createDefaultNode('oscillator', 'osc1', { x: 48, y: 264 });
     osc.label = 'Harmonic Core';
     osc.params = {
       ...osc.params,
-      waveform: wave,
-      unison: profile.stereoWidth > 0.55 ? '3' : '1',
-      unisonDetune: 9,
-      gain: 0.82,
+      waveform: cleanWave,
+      unison: profile.stereoWidth > 0.58 ? '3' : '1',
+      unisonDetune: 7,
+      gain: 0.5,
     };
 
-    const noise = createDefaultNode('noise', 'nz1', { x: 48, y: 296 });
-    noise.label = 'Breath / Air Chiff';
-    noise.params = {
-      color: profile.spectralCentroidHz > 2400 ? 'white' : 'pink',
-      tone: Math.round(clamp(f2.freqHz, 1100, 5600)),
-      q: 2.0,
-      gain: Number(clamp(0.06 + profile.noiseRatio * 0.45, 0.05, 0.32).toFixed(2)),
+    const slope = createDefaultNode('slopeEnv', 'slp1', { x: 48, y: 472 });
+    slope.label = 'Breath Onset';
+    slope.params = {
+      mode: 'oneShot',
+      rise: Number(clamp(profile.attackSec * 0.35, 0.006, 0.04).toFixed(3)),
+      fall: Number(clamp(0.07 + profile.attackSec * 0.6, 0.06, 0.16).toFixed(2)),
+      shape: -0.3,
+      depth: 0.6,
+      bipolar: false,
     };
 
-    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: 496 });
+    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: 664 });
     lfo.label = 'Breath Vibrato';
     lfo.params = {
       waveform: 'sine',
       rate: Number(profile.vibratoRateHz.toFixed(2)),
-      depth: Number(clamp(0.06 + profile.vibratoDepthCents / 95, 0.06, 0.3).toFixed(2)),
-      delay: Number(clamp(profile.attackSec * 1.4, 0.12, 0.45).toFixed(2)),
+      depth: Number(clamp(0.08 + profile.vibratoDepthCents / 140, 0.08, 0.26).toFixed(2)),
+      delay: Number(clamp(Math.max(0.14, profile.attackSec * 1.4), 0.14, 0.4).toFixed(2)),
     };
 
-    const shaper = createDefaultNode('shaper', 'shp1', { x: 320, y: 120 });
-    shaper.label = 'Warmth / Reed';
-    shaper.params = {
-      drive: Number(clamp(0.12 + (1 - profile.oddEvenRatio) * 0.25, 0.1, 0.36).toFixed(2)),
-      asymmetry: Number(clamp((1 - profile.oddEvenRatio) * 0.35, 0.05, 0.3).toFixed(2)),
-      mix: 0.48,
-    };
-
-    nodes.push(osc, noise, lfo, shaper, eq, flt, env, rev, out);
+    nodes.push(pipe, osc, slope, lfo, eq, flt, env, rev, out);
     connections.push(
-      { id: 'c1', fromNode: 'osc1', fromPort: 'out', toNode: 'shp1', toPort: 'in', amount: 1.0 },
-      { id: 'c2', fromNode: 'nz1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 0.4 },
-      { id: 'c3', fromNode: 'lfo1', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: 0.12 },
-      { id: 'c4', fromNode: 'shp1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
-      { id: 'c5', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
-      { id: 'c6', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
-      { id: 'c7', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: Number(clamp(0.24 + (profile.attackBrightnessRatio - 1) * 0.18, 0.15, 0.55).toFixed(2)) },
-      { id: 'c8', fromNode: 'env1', fromPort: 'out', toNode: 'rev1', toPort: 'in', amount: 1.0 },
-      { id: 'c9', fromNode: 'rev1', fromPort: 'out', toNode: 'out1', toPort: 'in', amount: 1.0 }
+      { id: 'c1', fromNode: 'pipe1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 0.85 },
+      { id: 'c2', fromNode: 'osc1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 0.85 },
+      { id: 'c3', fromNode: 'slp1', fromPort: 'cv', toNode: 'pipe1', toPort: 'breath', amount: 0.3 },
+      { id: 'c4', fromNode: 'lfo1', fromPort: 'cv', toNode: 'pipe1', toPort: 'pitch', amount: 0.14 },
+      { id: 'c5', fromNode: 'lfo1', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: 0.14 },
+      { id: 'c6', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
+      { id: 'c7', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
+      { id: 'c8', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: Number(clamp(0.2 + (profile.attackBrightnessRatio - 1) * 0.16, 0.14, 0.45).toFixed(2)) },
+      { id: 'c9', fromNode: 'env1', fromPort: 'out', toNode: 'rev1', toPort: 'in', amount: 1.0 },
+      { id: 'c10', fromNode: 'rev1', fromPort: 'out', toNode: 'out1', toPort: 'in', amount: 1.0 }
     );
     modMatrix.push(
-      { id: 'm1', enabled: true, source: 'velocity', via: 'none', targetNodeId: 'flt1', targetParam: 'cutoff', amount: 0.36, curve: 'linear', label: 'Velocity -> Breath Brightness' },
+      { id: 'm1', enabled: true, source: 'velocity', via: 'none', targetNodeId: 'flt1', targetParam: 'cutoff', amount: 0.34, curve: 'linear', label: 'Velocity -> Breath Brightness' },
       { id: 'm2', enabled: true, source: 'macroX', via: 'none', targetNodeId: 'flt1', targetParam: 'cutoff', amount: 0.45, curve: 'linear', label: 'Macro X -> Tone' },
-      { id: 'm3', enabled: true, source: 'macroY', via: 'none', targetNodeId: 'nz1', targetParam: 'gain', amount: 0.32, curve: 'linear', label: 'Macro Y -> Breath Air' }
+      { id: 'm3', enabled: true, source: 'macroY', via: 'none', targetNodeId: 'pipe1', targetParam: 'breathNoise', amount: 0.28, curve: 'linear', label: 'Macro Y -> Breath Air' }
     );
 
     notes.push(
-      `${wave.charAt(0).toUpperCase() + wave.slice(1)} oscillator (${Math.round(profile.oddEvenRatio * 100)}% odd-harmonic weight) layered with filtered air noise.`,
-      `Asymmetric Warmth Shaper + 4-band Parametric EQ sculpting resonances at ${f1.freqHz} Hz and ${f2.freqHz} Hz.`
+      `Blown Pipe (${boreType}) paired with clean ${cleanWave} oscillator (${Math.round(profile.oddEvenRatio * 100)}% odd-harmonic weight).`,
+      `Slope breath onset + 4-band Parametric EQ sculpting acoustic bore formants at ${f1.freqHz} Hz and ${f2.freqHz} Hz.`
     );
   }
 

@@ -43,9 +43,12 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
     this.lastOut = 0;
     this.lastTriggered = false;
     this.exciterSamplesLeft = 0;
+    this.exciterTotal = 64;
     this.bowPhase = 0;
     this.bowEnv = 0;
     this.prevPluckFilter = 0;
+    this.apState = 0;
+    this.apPrevIn = 0;
     this.rosinLp = 0;
     this.dcIn = 0;
     this.dcOut = 0;
@@ -90,30 +93,46 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
     if (!Number.isFinite(this.rosinLp)) this.rosinLp = 0;
     if (!Number.isFinite(this.bowEnv)) this.bowEnv = 0;
     if (!Number.isFinite(this.prevPluckFilter)) this.prevPluckFilter = 0;
+    if (!Number.isFinite(this.apState)) this.apState = 0;
+    if (!Number.isFinite(this.apPrevIn)) this.apPrevIn = 0;
 
     if (gate > 0.5 && !this.lastTriggered) {
       this.lastTriggered = true;
       const f = this.safeClamp(freqArr[0], 20, 6000, 220);
       const period = Math.max(4, Math.min(this.maxDelay - 2, Math.round(sampleRate / f)));
-      this.exciterSamplesLeft = mode === 2 ? Math.round(period * 0.45) : period;
+      this.exciterTotal = mode === 2 ? Math.max(12, Math.round(period * 0.85)) : period;
+      this.exciterSamplesLeft = this.exciterTotal;
       this.prevPluckFilter = 0;
       if (mode === 1) this.bowEnv = 0.15;
     } else if (gate < 0.5) {
       this.lastTriggered = false;
     }
 
+    const baseLpCoeff = mode === 2 ? Math.max(0.24, 0.78 - damping * 0.42) : 1 - damping * 0.58;
+
     for (let i = 0; i < channel.length; i++) {
       const freq = this.safeClamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 20, 6000, 220);
       const bowPressure = this.safeClamp(bowPressureArr.length > 1 ? bowPressureArr[i] : bowPressureArr[0], 0.05, 1.0, 0.56);
-      const exactDelay = Math.max(4, Math.min(this.maxDelay - 4, sampleRate / freq - 0.5));
-      const intDelay = Math.floor(exactDelay);
-      const frac = exactDelay - intDelay;
+      const lpBlend = mode === 1 ? 0 : Math.max(0, Math.min(0.88, (freq - 180) / 1100));
+      const lpCoeff = baseLpCoeff + (0.992 - baseLpCoeff) * lpBlend;
+      const oneMinusLp = 1 - lpCoeff;
+      const w = (6.28318530718 * freq) / sampleRate;
+      const lpLag = w > 0.0005
+        ? Math.atan2(oneMinusLp * Math.sin(w), 1 - oneMinusLp * Math.cos(w)) / w
+        : oneMinusLp / Math.max(0.05, lpCoeff);
+      const exactDelay = Math.max(2.5, Math.min(this.maxDelay - 4, sampleRate / freq - lpLag));
+      let intDelay = Math.floor(exactDelay);
+      let delta = exactDelay - intDelay;
+      if (delta < 0.5 && intDelay > 1) {
+        intDelay -= 1;
+        delta += 1;
+      }
+      const apCoeff = (1 - delta) / (1 + delta);
       const r1 = (this.writeIndex - intDelay + this.maxDelay) % this.maxDelay;
-      const r2 = (r1 - 1 + this.maxDelay) % this.maxDelay;
       const s1 = Number.isFinite(this.buffer[r1]) ? this.buffer[r1] : 0;
-      const s2 = Number.isFinite(this.buffer[r2]) ? this.buffer[r2] : 0;
-      const delayedSample = s1 * (1 - frac) + s2 * frac;
-      const lpCoeff = 1 - damping * 0.65;
+      const delayedSample = apCoeff * (s1 - this.apState) + this.apPrevIn;
+      this.apPrevIn = s1;
+      this.apState = Number.isFinite(delayedSample) ? delayedSample : 0;
       const filtered = this.lastOut + lpCoeff * (delayedSample - this.lastOut);
       this.lastOut = Number.isFinite(filtered) ? filtered : 0;
 
@@ -140,14 +159,23 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
         const rawNoise = this.nextRand();
         const shaped = this.prevPluckFilter + brightness * (rawNoise - this.prevPluckFilter);
         this.prevPluckFilter = shaped;
-        exciter += shaped * velocity * 0.65;
+        const phase = 1 - this.exciterSamplesLeft / Math.max(1, this.exciterTotal);
+        const pulse = Math.sin(phase * Math.PI);
+        if (mode === 2) {
+          const hammerWave = Math.sin(phase * 6.2831853) * 0.5 * (1 - Math.cos(phase * 6.2831853));
+          exciter += (hammerWave * 0.72 + shaped * brightness * 0.14 * pulse) * velocity * 0.58;
+        } else {
+          const bodyWeight = (1 - brightness * 0.75) * 0.36 * pulse;
+          exciter += (shaped * 0.58 + bodyWeight) * velocity * 0.70;
+        }
         this.exciterSamplesLeft--;
       }
 
-      const activeDecay = mode === 1 ? (gate > 0.5 ? 0.945 + (1 - damping) * 0.035 : decay * 0.94) : (gate > 0.5 ? decay : Math.min(decay, 0.965));
+      const baseDecay = gate > 0.5 ? decay : Math.min(decay, 0.968);
+      const activeDecay = mode === 1 ? (gate > 0.5 ? 0.945 + (1 - damping) * 0.035 : decay * 0.94) : Math.pow(baseDecay, Math.min(1.5, 210 / Math.max(55, freq)));
       let nextVal = exciter + this.lastOut * activeDecay;
       if (sympathetic > 0.01) {
-        nextVal += (Math.tanh(nextVal * (1 + sympathetic * 5.5)) - nextVal) * sympathetic * 0.35;
+        nextVal += (Math.tanh(nextVal * (1 + sympathetic * 1.8)) - nextVal) * sympathetic * 0.12;
       }
       nextVal = this.safeClamp(nextVal, -1.4, 1.4, 0);
       this.buffer[this.writeIndex] = nextVal;
