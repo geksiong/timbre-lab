@@ -66,6 +66,12 @@ function getNodeSummary(node: SynthNode): string {
     }
     case 'physicalString':
       return `${String(p.excitation ?? 'pluck')} · damp ${Number(p.damping ?? 0.45).toFixed(2)}`;
+    case 'modalResonator':
+      return `${String(p.material ?? 'bell')} · ${String(p.exciterType ?? 'mallet')} · ${Number(p.decay ?? 1.4).toFixed(1)}s`;
+    case 'blownPipe':
+      return `${String(p.boreType ?? 'flute')} · breath ${Math.round(Number(p.breathPressure ?? 0.65) * 100)}%`;
+    case 'subHarmonic':
+      return `${String(p.waveform ?? 'triangle')} · sub ${Math.round(Number(p.sub1Level ?? 0.55) * 100)}% · 5th ${Math.round(Number(p.fifthLevel ?? 0.25) * 100)}%`;
     case 'noise':
       return `${String(p.color ?? 'pink')} · ${Math.round(Number(p.tone ?? 2200))} Hz`;
     case 'combFilter': {
@@ -315,6 +321,9 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     'oscillator',
     'fmOperator',
     'physicalString',
+    'modalResonator',
+    'blownPipe',
+    'subHarmonic',
     'noise',
     'combFilter',
     'filter',
@@ -505,20 +514,9 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
             const start = getPortCenter(fromNode, conn.fromPort, 'out');
             const end = getPortCenter(toNode, conn.toPort, 'in');
             const path = buildBezierPath(start.x, start.y, end.x, end.y);
-            const isCv =
-              conn.fromPort === 'cv' ||
-              conn.toPort === 'cutoff' ||
-              conn.toPort === 'pitch' ||
-              conn.toPort === 'index' ||
-              conn.toPort === 'bow' ||
-              conn.toPort === 'freq' ||
-              conn.toPort === 'fb' ||
-              conn.toPort === 'amp' ||
-              conn.toPort === 'rate' ||
-              conn.toPort === 'depth' ||
-              conn.toPort === 'density' ||
-              conn.toPort === 'mix' ||
-              conn.toPort === 'shape';
+            const fromSignal = MODULE_REGISTRY[fromNode.type]?.ports.find((p) => p.id === conn.fromPort)?.signal;
+            const toSignal = MODULE_REGISTRY[toNode.type]?.ports.find((p) => p.id === conn.toPort)?.signal;
+            const isCv = fromSignal === 'cv' || toSignal === 'cv';
             const isSelected = selectedConnId === conn.id;
             const strokeColor = isSelected
               ? theme === 'light'

@@ -1,4 +1,5 @@
 import { ALTERNATIVE_CARRIER_WORKLET_CODE } from './carrierWaves';
+import { SOURCE_WORKLET_CODE } from './sourceWorklets';
 
 export function generateStandaloneEngineSource(): string {
   return `/**
@@ -382,11 +383,14 @@ registerProcessor('timbre-safety-limiter', SafetyLimiterProcessor);
 registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
+${SOURCE_WORKLET_CODE}
 \`;
 
 const VALID_OSC_TYPES = new Set(['sine', 'square', 'sawtooth', 'triangle']);
 const ALT_CARRIER_MODES = { pulse: 0, filteredNoise: 1, customHarmonics: 2, vocalFormant: 3, wavetable: 4 };
 const WT_BANK_MAP = { analog: 0, vocal: 1, bell: 2, bowed: 3, digital: 4, sub: 5 };
+const MODAL_MAT_MAP = { marimba: 0, bell: 1, kalimba: 2, steelDrum: 3, plate: 4, harmonic: 5 };
+const PIPE_BORE_MAP = { flute: 0, clarinet: 1, reed: 2, organPipe: 3 };
 const VALID_FILTER_TYPES = new Set(['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']);
 
 function parseHarmonicsArr(raw) {
@@ -1051,6 +1055,128 @@ export class TimbreLabSynth {
         }
         audioOut.set(node.id + ':out', amp);
         cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
+        modTargets.set(node.id + ':gain', { param: g.gain, scale: 0.7 });
+      } else if (node.type === 'modalResonator') {
+        const g = track(ctx.createGain()), amp = track(ctx.createGain());
+        g.gain.value = clampFinite(p.gain, 0, 1.5, 0.85); g.connect(amp);
+        const freq = clampFinite(baseFreq * Math.pow(2, clampFinite(p.octave, -3, 3, 0) + this.pitchBendSemitones / 12), 20, 4000, 220);
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-modal-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }));
+            w.onprocessorerror = () => { this.workletReady = false; };
+            const excIn = track(ctx.createGain()); excIn.connect(w);
+            w.parameters.get('frequency').value = freq;
+            w.parameters.get('material').value = MODAL_MAT_MAP[String(p.material || 'bell')] ?? 1;
+            w.parameters.get('inharmonicity').value = clampFinite(p.inharmonicity, 0, 1, 0.15);
+            w.parameters.get('brightness').value = clampFinite(p.brightness, 0.05, 1, 0.65);
+            w.parameters.get('decay').value = clampFinite(p.decay, 0.08, 8.0, 1.4);
+            w.parameters.get('damping').value = clampFinite(p.damping, 0.02, 0.98, 0.45);
+            w.parameters.get('exciterType').value = p.exciterType === 'pluck' ? 1 : p.exciterType === 'continuous' ? 2 : 0;
+            w.parameters.get('exciterMix').value = clampFinite(p.exciterMix, 0, 1, 0.7);
+            w.parameters.get('velocity').value = velNorm;
+            w.parameters.get('gate').setValueAtTime(1, now);
+            w.connect(g);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            releases.push((t) => { w.parameters.get('gate').setValueAtTime(0, t); return Math.min(1.6, Math.max(0.2, clampFinite(p.decay, 0.08, 8, 1.4) * 0.45)); });
+            audioIn.set(node.id + ':exciter', excIn);
+            cvTarget.set(node.id + ':pitch', { param: w.parameters.get('frequency'), scale: baseFreq * 0.08 });
+            cvTarget.set(node.id + ':brightness', { param: w.parameters.get('brightness'), scale: 0.45 });
+            modTargets.set(node.id + ':pitch', { param: w.parameters.get('frequency'), scale: baseFreq * 0.06 });
+            modTargets.set(node.id + ':brightness', { param: w.parameters.get('brightness'), scale: 0.45 });
+            modTargets.set(node.id + ':inharmonicity', { param: w.parameters.get('inharmonicity'), scale: 0.45 });
+            modTargets.set(node.id + ':damping', { param: w.parameters.get('damping'), scale: 0.4 });
+            ok = true;
+          } catch { this.workletReady = false; }
+        }
+        if (!ok) {
+          const o = track(ctx.createOscillator()); o.type = 'sine'; o.frequency.value = freq;
+          o.connect(g); o.start(now); stops.push(() => o.stop());
+          cvTarget.set(node.id + ':pitch', { param: o.detune, scale: 1200 });
+          modTargets.set(node.id + ':pitch', { param: o.detune, scale: 1200 });
+        }
+        audioOut.set(node.id + ':out', amp);
+        cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
+        modTargets.set(node.id + ':gain', { param: g.gain, scale: 0.7 });
+      } else if (node.type === 'blownPipe') {
+        const g = track(ctx.createGain()), amp = track(ctx.createGain());
+        g.gain.value = clampFinite(p.gain, 0, 1.5, 0.85); g.connect(amp);
+        const freq = clampFinite(baseFreq * Math.pow(2, clampFinite(p.octave, -2, 2, 0) + this.pitchBendSemitones / 12), 25, 4000, 220);
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-pipe-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }));
+            w.onprocessorerror = () => { this.workletReady = false; };
+            const excIn = track(ctx.createGain()); excIn.connect(w);
+            w.parameters.get('frequency').value = freq;
+            w.parameters.get('boreType').value = PIPE_BORE_MAP[String(p.boreType || 'flute')] ?? 0;
+            w.parameters.get('breathPressure').value = clampFinite(p.breathPressure, 0.05, 1.25, 0.65);
+            w.parameters.get('embouchure').value = clampFinite(p.embouchure, 0.05, 1.0, 0.55);
+            w.parameters.get('breathNoise').value = clampFinite(p.breathNoise, 0, 1, 0.25);
+            w.parameters.get('damping').value = clampFinite(p.damping, 0.05, 0.95, 0.38);
+            w.parameters.get('overblow').value = clampFinite(p.overblow, 0, 1, 0);
+            w.parameters.get('exciterMix').value = clampFinite(p.exciterMix, 0, 1, 0.5);
+            w.parameters.get('velocity').value = velNorm;
+            w.parameters.get('gate').setValueAtTime(1, now);
+            w.connect(g);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            releases.push((t) => { w.parameters.get('gate').setValueAtTime(0, t); return 0.32; });
+            audioIn.set(node.id + ':exciter', excIn);
+            cvTarget.set(node.id + ':pitch', { param: w.parameters.get('frequency'), scale: baseFreq * 0.08 });
+            cvTarget.set(node.id + ':breath', { param: w.parameters.get('breathPressure'), scale: 0.45 });
+            modTargets.set(node.id + ':pitch', { param: w.parameters.get('frequency'), scale: baseFreq * 0.06 });
+            modTargets.set(node.id + ':breathPressure', { param: w.parameters.get('breathPressure'), scale: 0.45 });
+            modTargets.set(node.id + ':embouchure', { param: w.parameters.get('embouchure'), scale: 0.4 });
+            modTargets.set(node.id + ':breathNoise', { param: w.parameters.get('breathNoise'), scale: 0.5 });
+            modTargets.set(node.id + ':damping', { param: w.parameters.get('damping'), scale: 0.4 });
+            modTargets.set(node.id + ':overblow', { param: w.parameters.get('overblow'), scale: 0.55 });
+            ok = true;
+          } catch { this.workletReady = false; }
+        }
+        if (!ok) {
+          const o = track(ctx.createOscillator()); o.type = 'triangle'; o.frequency.value = freq;
+          o.connect(g); o.start(now); stops.push(() => o.stop());
+          cvTarget.set(node.id + ':pitch', { param: o.detune, scale: 1200 });
+          modTargets.set(node.id + ':pitch', { param: o.detune, scale: 1200 });
+        }
+        audioOut.set(node.id + ':out', amp);
+        cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
+        modTargets.set(node.id + ':gain', { param: g.gain, scale: 0.7 });
+      } else if (node.type === 'subHarmonic') {
+        const g = track(ctx.createGain()), amp = track(ctx.createGain()), fifthCv = track(ctx.createGain());
+        g.gain.value = clampFinite(p.gain, 0, 1.4, 0.72) * velNorm; fifthCv.gain.value = 1;
+        fifthCv.connect(g); g.connect(amp);
+        const pSum = track(ctx.createGain()), pConst = track(ctx.createConstantSource());
+        pConst.offset.value = 0; pConst.connect(pSum); pConst.start(now); stops.push(() => pConst.stop());
+        const wf = safeOscType(p.waveform, 'triangle');
+        const freq = clampFinite(baseFreq * Math.pow(2, clampFinite(p.octave, -2, 2, 0) + this.pitchBendSemitones / 12), 16, 14000, 220);
+        const det = clampFinite(p.detune, -40, 40, 4), spread = clampFinite(p.stereoSpread, 0, 1, 0.45);
+        const specs = [
+          { key: 'sub2Level', mult: 0.25, pan: -0.15, dm: -1.0, up: false },
+          { key: 'sub1Level', mult: 0.5, pan: 0.15, dm: -0.5, up: false },
+          { key: 'fundLevel', mult: 1.0, pan: 0.0, dm: 0.0, up: false },
+          { key: 'fifthLevel', mult: Math.pow(2, 7 / 12), pan: -0.75, dm: 0.65, up: true },
+          { key: 'octUpLevel', mult: 2.0, pan: 0.75, dm: 1.0, up: true },
+        ];
+        const oscs = specs.map((s) => {
+          const o = track(ctx.createOscillator()), sg = track(ctx.createGain()), pan = track(ctx.createStereoPanner());
+          o.type = wf; o.frequency.value = clampFinite(freq * s.mult, 12, 18000, 220); o.detune.value = det * s.dm;
+          sg.gain.value = clampFinite(p[s.key], 0, 1, 0.5) * 0.42; pan.pan.value = s.pan * spread;
+          pSum.connect(o.detune); o.connect(sg); sg.connect(pan); pan.connect(s.up ? fifthCv : g);
+          o.start(now); stops.push(() => o.stop());
+          return sg;
+        });
+        audioOut.set(node.id + ':out', amp);
+        cvTarget.set(node.id + ':pitch', { param: pConst.offset, scale: 1200 });
+        cvTarget.set(node.id + ':fifth', { param: fifthCv.gain, scale: 0.85 });
+        cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
+        modTargets.set(node.id + ':pitch', { param: pConst.offset, scale: 1200 });
+        modTargets.set(node.id + ':detune', { param: pConst.offset, scale: 45 });
+        modTargets.set(node.id + ':sub2Level', { param: oscs[0].gain, scale: 0.42 });
+        modTargets.set(node.id + ':sub1Level', { param: oscs[1].gain, scale: 0.42 });
+        modTargets.set(node.id + ':fundLevel', { param: oscs[2].gain, scale: 0.42 });
+        modTargets.set(node.id + ':fifthLevel', { param: oscs[3].gain, scale: 0.42 });
+        modTargets.set(node.id + ':octUpLevel', { param: oscs[4].gain, scale: 0.42 });
         modTargets.set(node.id + ':gain', { param: g.gain, scale: 0.7 });
       } else if (node.type === 'noise') {
         const src = track(ctx.createBufferSource()), bp = track(ctx.createBiquadFilter()), g = track(ctx.createGain()), amp = track(ctx.createGain());

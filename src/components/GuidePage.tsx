@@ -39,7 +39,7 @@ interface InstrumentRecipe {
 const GUIDE_SECTIONS: { id: GuideSectionId; num: string; label: string }[] = [
   { id: 'signal-flow', num: '01', label: 'How Modeling Works' },
   { id: 'recipes', num: '02', label: 'Instrument Recipes' },
-  { id: 'modules', num: '03', label: '15-Module Reference' },
+  { id: 'modules', num: '03', label: 'Module Reference' },
   { id: 'modulation', num: '04', label: 'Mod Matrix & Controls' },
   { id: 'analysis-export', num: '05', label: 'Scopes, MIDI & Export' },
 ];
@@ -230,8 +230,11 @@ const INSTRUMENT_RECIPES: InstrumentRecipe[] = [
 
 const MODULE_ORDER: ModuleType[] = [
   'physicalString',
+  'modalResonator',
+  'blownPipe',
   'oscillator',
   'fmOperator',
+  'subHarmonic',
   'noise',
   'combFilter',
   'parametricEq',
@@ -605,7 +608,7 @@ export const GuidePage: React.FC<GuidePageProps> = ({
                 <div className="space-y-1">
                   <span className="text-xs font-mono text-cyan-700 dark:text-cyan-400">03 · DSP ENCYCLOPEDIA</span>
                   <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
-                    All 15 Synth Modules Explained
+                    All {MODULE_ORDER.length} Synth Modules Explained
                   </h2>
                   <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
                     Synced directly with the studio&apos;s live DSP definitions, ports, and bowed-instrument tips.

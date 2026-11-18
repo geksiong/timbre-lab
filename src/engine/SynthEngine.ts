@@ -16,6 +16,11 @@ import {
   parseHarmonicsString,
   resolveWorkletCarrierMode,
 } from './carrierWaves';
+import {
+  MODAL_MATERIAL_INDEX,
+  PIPE_BORE_INDEX,
+  SOURCE_WORKLET_CODE,
+} from './sourceWorklets';
 
 const KARPLUS_WORKLET_CODE = `
 class KarplusStrongProcessor extends AudioWorkletProcessor {
@@ -506,6 +511,7 @@ registerProcessor('timbre-safety-limiter', SafetyLimiterProcessor);
 registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
+${SOURCE_WORKLET_CODE}
 `;
 
 interface ActiveVoice {
@@ -2709,6 +2715,379 @@ export class SynthEngine {
               setPitchBend: (_s, t) => applyFallback({}, t),
             });
           }
+          break;
+        }
+
+        case 'modalResonator': {
+          const levelGain = track(ctx.createGain());
+          const ampCvTarget = track(ctx.createGain());
+          ampCvTarget.gain.value = 1;
+          levelGain.connect(ampCvTarget);
+
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-modal-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              const exciterIn = track(ctx.createGain());
+              exciterIn.gain.value = 1;
+              exciterIn.connect(worklet);
+              worklet.connect(levelGain);
+
+              const freqParam = worklet.parameters.get('frequency')!;
+              const matParam = worklet.parameters.get('material')!;
+              const inharmParam = worklet.parameters.get('inharmonicity')!;
+              const brightParam = worklet.parameters.get('brightness')!;
+              const decayParam = worklet.parameters.get('decay')!;
+              const dampParam = worklet.parameters.get('damping')!;
+              const excTypeParam = worklet.parameters.get('exciterType')!;
+              const excMixParam = worklet.parameters.get('exciterMix')!;
+              const gateParam = worklet.parameters.get('gate')!;
+              const velParam = worklet.parameters.get('velocity')!;
+
+              const applyModal = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const oct = clampFinite(merged.octave, -3, 3, 0);
+                const freq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 20, 4000, 220);
+                const matIdx = MODAL_MATERIAL_INDEX[String(merged.material ?? 'bell')] ?? 1;
+                const excStr = String(merged.exciterType ?? 'mallet');
+                const excIdx = excStr === 'pluck' ? 1 : excStr === 'continuous' ? 2 : 0;
+
+                setAudioParam(freqParam, freq, t, 0.004, immediate);
+                matParam.setValueAtTime(matIdx, t);
+                inharmParam.setValueAtTime(clampFinite(merged.inharmonicity, 0, 1, 0.15), t);
+                setAudioParam(brightParam, clampFinite(merged.brightness, 0.05, 1, 0.65), t, 0.01, immediate);
+                decayParam.setValueAtTime(clampFinite(merged.decay, 0.08, 8.0, 1.4), t);
+                dampParam.setValueAtTime(clampFinite(merged.damping, 0.02, 0.98, 0.45), t);
+                excTypeParam.setValueAtTime(excIdx, t);
+                excMixParam.setValueAtTime(clampFinite(merged.exciterMix, 0, 1, 0.7), t);
+                velParam.setValueAtTime(velNorm, t);
+                setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.85), t, 0.005, immediate);
+              };
+
+              applyModal(node.params, now, true);
+              gateParam.setValueAtTime(1, now);
+
+              releaseCallbacks.push((t) => {
+                gateParam.setValueAtTime(0, t);
+                const dec = clampFinite(this.getLiveNodeParams(node.id, node.params).decay, 0.08, 8.0, 1.4);
+                return Math.min(1.6, Math.max(0.2, dec * 0.45));
+              });
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:exciter`, exciterIn);
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.08 });
+              cvTargets.set(`${node.id}:brightness`, { param: brightParam, baseScale: 0.45 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+
+              modParamTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.06 });
+              modParamTargets.set(`${node.id}:brightness`, { param: brightParam, baseScale: 0.45 });
+              modParamTargets.set(`${node.id}:inharmonicity`, { param: inharmParam, baseScale: 0.45 });
+              modParamTargets.set(`${node.id}:damping`, { param: dampParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.7 });
+
+              nodeControllers.set(node.id, {
+                type: 'modalResonator',
+                updateParams: applyModal,
+                setPitchBend: (_s, t) => applyModal({}, t),
+              });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const o1 = track(ctx.createOscillator());
+            const o2 = track(ctx.createOscillator());
+            const o3 = track(ctx.createOscillator());
+            const excIn = track(ctx.createGain());
+            const bp = track(ctx.createBiquadFilter());
+            o1.type = 'sine';
+            o2.type = 'sine';
+            o3.type = 'triangle';
+            bp.type = 'lowpass';
+            o1.connect(bp);
+            o2.connect(bp);
+            o3.connect(bp);
+            excIn.connect(bp);
+            bp.connect(levelGain);
+
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const oct = clampFinite(merged.octave, -3, 3, 0);
+              const freq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 20, 8000, 220);
+              setAudioParam(o1.frequency, freq, t, 0.005, immediate);
+              setAudioParam(o2.frequency, Math.min(16000, freq * 2.42), t, 0.005, immediate);
+              setAudioParam(o3.frequency, Math.min(16000, freq * 3.98), t, 0.005, immediate);
+              setAudioParam(bp.frequency, clampFinite(freq * (2 + clampFinite(merged.brightness, 0.05, 1, 0.65) * 8), 100, 16000, 2400), t, 0.01, immediate);
+              setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.85) * velNorm * 0.42, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            o1.start(now);
+            o2.start(now);
+            o3.start(now);
+            stopCallbacks.push(() => {
+              o1.stop();
+              o2.stop();
+              o3.stop();
+            });
+            audioInputs.set(`${node.id}:exciter`, excIn);
+            audioOutputs.set(`${node.id}:out`, ampCvTarget);
+            cvTargets.set(`${node.id}:pitch`, { param: o1.detune, baseScale: 1200 });
+            cvTargets.set(`${node.id}:brightness`, { param: bp.detune, baseScale: 1800 });
+            cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+            modParamTargets.set(`${node.id}:pitch`, { param: o1.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.7 });
+            nodeControllers.set(node.id, {
+              type: 'modalResonator',
+              updateParams: applyFallback,
+              setPitchBend: (_s, t) => applyFallback({}, t),
+            });
+          }
+          break;
+        }
+
+        case 'blownPipe': {
+          const levelGain = track(ctx.createGain());
+          const ampCvTarget = track(ctx.createGain());
+          ampCvTarget.gain.value = 1;
+          levelGain.connect(ampCvTarget);
+
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-pipe-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              const exciterIn = track(ctx.createGain());
+              exciterIn.gain.value = 1;
+              exciterIn.connect(worklet);
+              worklet.connect(levelGain);
+
+              const freqParam = worklet.parameters.get('frequency')!;
+              const boreParam = worklet.parameters.get('boreType')!;
+              const pressParam = worklet.parameters.get('breathPressure')!;
+              const embParam = worklet.parameters.get('embouchure')!;
+              const noiseParam = worklet.parameters.get('breathNoise')!;
+              const dampParam = worklet.parameters.get('damping')!;
+              const overParam = worklet.parameters.get('overblow')!;
+              const excMixParam = worklet.parameters.get('exciterMix')!;
+              const gateParam = worklet.parameters.get('gate')!;
+              const velParam = worklet.parameters.get('velocity')!;
+
+              const applyPipe = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const oct = clampFinite(merged.octave, -2, 2, 0);
+                const freq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 25, 4000, 220);
+                const boreIdx = PIPE_BORE_INDEX[String(merged.boreType ?? 'flute')] ?? 0;
+
+                setAudioParam(freqParam, freq, t, 0.005, immediate);
+                boreParam.setValueAtTime(boreIdx, t);
+                setAudioParam(pressParam, clampFinite(merged.breathPressure, 0.05, 1.25, 0.65), t, 0.012, immediate);
+                embParam.setValueAtTime(clampFinite(merged.embouchure, 0.05, 1.0, 0.55), t);
+                noiseParam.setValueAtTime(clampFinite(merged.breathNoise, 0, 1, 0.25), t);
+                dampParam.setValueAtTime(clampFinite(merged.damping, 0.05, 0.95, 0.38), t);
+                overParam.setValueAtTime(clampFinite(merged.overblow, 0, 1, 0), t);
+                excMixParam.setValueAtTime(clampFinite(merged.exciterMix, 0, 1, 0.5), t);
+                velParam.setValueAtTime(velNorm, t);
+                setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.85), t, 0.006, immediate);
+              };
+
+              applyPipe(node.params, now, true);
+              gateParam.setValueAtTime(1, now);
+
+              releaseCallbacks.push((t) => {
+                gateParam.setValueAtTime(0, t);
+                return 0.32;
+              });
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:exciter`, exciterIn);
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.08 });
+              cvTargets.set(`${node.id}:breath`, { param: pressParam, baseScale: 0.45 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+
+              modParamTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.06 });
+              modParamTargets.set(`${node.id}:breathPressure`, { param: pressParam, baseScale: 0.45 });
+              modParamTargets.set(`${node.id}:embouchure`, { param: embParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:breathNoise`, { param: noiseParam, baseScale: 0.5 });
+              modParamTargets.set(`${node.id}:damping`, { param: dampParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:overblow`, { param: overParam, baseScale: 0.55 });
+              modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.7 });
+
+              nodeControllers.set(node.id, {
+                type: 'blownPipe',
+                updateParams: applyPipe,
+                setPitchBend: (_s, t) => applyPipe({}, t),
+              });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const osc = track(ctx.createOscillator());
+            const breathSrc = track(ctx.createBufferSource());
+            breathSrc.buffer = this.noiseBufferPink;
+            breathSrc.loop = true;
+            const bp = track(ctx.createBiquadFilter());
+            bp.type = 'bandpass';
+            const nGain = track(ctx.createGain());
+            const lp = track(ctx.createBiquadFilter());
+            lp.type = 'lowpass';
+            const excIn = track(ctx.createGain());
+
+            osc.connect(lp);
+            breathSrc.connect(bp);
+            bp.connect(nGain);
+            nGain.connect(lp);
+            excIn.connect(lp);
+            lp.connect(levelGain);
+
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const oct = clampFinite(merged.octave, -2, 2, 0);
+              const freq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 25, 8000, 220);
+              const bore = String(merged.boreType ?? 'flute');
+              osc.type = bore === 'clarinet' ? 'square' : bore === 'reed' ? 'sawtooth' : 'triangle';
+              setAudioParam(osc.frequency, freq, t, 0.005, immediate);
+              setAudioParam(bp.frequency, Math.min(10000, freq * 2.2), t, 0.01, immediate);
+              setAudioParam(nGain.gain, clampFinite(merged.breathNoise, 0, 1, 0.25) * 0.28, t, 0.01, immediate);
+              setAudioParam(lp.frequency, clampFinite(freq * (2.5 + clampFinite(merged.breathPressure, 0.1, 1.2, 0.65) * 4), 120, 12000, 1800), t, 0.01, immediate);
+              setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.5, 0.85) * velNorm * 0.55, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            osc.start(now);
+            breathSrc.start(now);
+            stopCallbacks.push(() => {
+              osc.stop();
+              breathSrc.stop();
+            });
+            audioInputs.set(`${node.id}:exciter`, excIn);
+            audioOutputs.set(`${node.id}:out`, ampCvTarget);
+            cvTargets.set(`${node.id}:pitch`, { param: osc.detune, baseScale: 1200 });
+            cvTargets.set(`${node.id}:breath`, { param: lp.detune, baseScale: 1800 });
+            cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+            modParamTargets.set(`${node.id}:pitch`, { param: osc.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.7 });
+            nodeControllers.set(node.id, {
+              type: 'blownPipe',
+              updateParams: applyFallback,
+              setPitchBend: (_s, t) => applyFallback({}, t),
+            });
+          }
+          break;
+        }
+
+        case 'subHarmonic': {
+          const levelGain = track(ctx.createGain());
+          const ampCvTarget = track(ctx.createGain());
+          ampCvTarget.gain.value = 1;
+          levelGain.connect(ampCvTarget);
+
+          const pitchSum = track(ctx.createGain());
+          pitchSum.gain.value = 1;
+          const pitchConst = track(ctx.createConstantSource());
+          pitchConst.offset.value = 0;
+          pitchConst.connect(pitchSum);
+          pitchConst.start(now);
+          stopCallbacks.push(() => pitchConst.stop());
+
+          const fifthCvTarget = track(ctx.createGain());
+          fifthCvTarget.gain.value = 1;
+          fifthCvTarget.connect(levelGain);
+
+          const intervalSpecs = [
+            { key: 'sub2Level', mult: 0.25, panPos: -0.15, detMul: -1.0, upper: false },
+            { key: 'sub1Level', mult: 0.5, panPos: 0.15, detMul: -0.5, upper: false },
+            { key: 'fundLevel', mult: 1.0, panPos: 0.0, detMul: 0.0, upper: false },
+            { key: 'fifthLevel', mult: Math.pow(2, 7 / 12), panPos: -0.75, detMul: 0.65, upper: true },
+            { key: 'octUpLevel', mult: 2.0, panPos: 0.75, detMul: 1.0, upper: true },
+          ];
+
+          const subOscs = intervalSpecs.map((spec) => {
+            const osc = track(ctx.createOscillator());
+            const g = track(ctx.createGain());
+            const pan = track(ctx.createStereoPanner());
+            pitchSum.connect(osc.detune);
+            osc.connect(g);
+            g.connect(pan);
+            pan.connect(spec.upper ? fifthCvTarget : levelGain);
+            osc.start(now);
+            stopCallbacks.push(() => osc.stop());
+            return { ...spec, osc, gain: g, pan };
+          });
+
+          const applySub = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+            const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+            const wf = safeOscType(merged.waveform, 'triangle');
+            const oct = clampFinite(merged.octave, -2, 2, 0);
+            const det = clampFinite(merged.detune, -40, 40, 4);
+            const spread = clampFinite(merged.stereoSpread, 0, 1, 0.45);
+            const freq = clampFinite(baseFreq * Math.pow(2, oct + this.pitchBendSemitones / 12), 16, 14000, 220);
+
+            for (const sub of subOscs) {
+              sub.osc.type = wf;
+              setAudioParam(sub.osc.frequency, clampFinite(freq * sub.mult, 12, 18000, 220), t, 0.005, immediate);
+              setAudioParam(sub.osc.detune, det * sub.detMul, t, 0.008, immediate);
+              setAudioParam(sub.gain.gain, clampFinite(merged[sub.key], 0, 1, 0.5) * 0.42, t, 0.008, immediate);
+              setAudioParam(sub.pan.pan, sub.panPos * spread, t, 0.01, immediate);
+            }
+            setAudioParam(levelGain.gain, clampFinite(merged.gain, 0, 1.4, 0.72) * velNorm, t, 0.006, immediate);
+          };
+
+          applySub(node.params, now, true);
+
+          audioOutputs.set(`${node.id}:out`, ampCvTarget);
+          cvTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+          cvTargets.set(`${node.id}:fifth`, { param: fifthCvTarget.gain, baseScale: 0.85 });
+          cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+
+          modParamTargets.set(`${node.id}:pitch`, { param: pitchConst.offset, baseScale: 1200 });
+          modParamTargets.set(`${node.id}:detune`, { param: pitchConst.offset, baseScale: 45 });
+          modParamTargets.set(`${node.id}:sub2Level`, { param: subOscs[0].gain.gain, baseScale: 0.42 });
+          modParamTargets.set(`${node.id}:sub1Level`, { param: subOscs[1].gain.gain, baseScale: 0.42 });
+          modParamTargets.set(`${node.id}:fundLevel`, { param: subOscs[2].gain.gain, baseScale: 0.42 });
+          modParamTargets.set(`${node.id}:fifthLevel`, { param: subOscs[3].gain.gain, baseScale: 0.42 });
+          modParamTargets.set(`${node.id}:octUpLevel`, { param: subOscs[4].gain.gain, baseScale: 0.42 });
+          modParamTargets.set(`${node.id}:gain`, { param: levelGain.gain, baseScale: 0.7 });
+
+          nodeControllers.set(node.id, {
+            type: 'subHarmonic',
+            updateParams: applySub,
+            setPitchBend: (_s, t) => applySub({}, t),
+          });
           break;
         }
 
