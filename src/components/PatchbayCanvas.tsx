@@ -85,6 +85,16 @@ function getNodeSummary(node: SynthNode): string {
       return `${String(p.mode ?? 'lowpass')} · ${Math.round(Number(p.cutoff ?? 3200))} Hz`;
     case 'shaper':
       return `drive ${Math.round(Number(p.drive ?? 0.25) * 100)}% · mix ${Math.round(Number(p.mix ?? 0.6) * 100)}%`;
+    case 'formantFilter':
+      return `vowel ${Number(p.vowel ?? 0.5).toFixed(1)} · Q ${Number(p.resonance ?? 7.5).toFixed(1)}`;
+    case 'wavefolder':
+      return `fold ${Number(p.folds ?? 2.4).toFixed(1)}x · ${Number(p.stages ?? 2)}stg`;
+    case 'ringMod':
+      return `${String(p.mode ?? 'ring')} · ${p.tuneMode === 'freeHz' ? `${Math.round(Number(p.frequency ?? 320))}Hz` : `${Number(p.ratio ?? 1.41).toFixed(2)}x`}`;
+    case 'bitcrusher':
+      return `${Number(p.bits ?? 8).toFixed(0)}-bit · ${Number(p.downsample ?? 4)}x hold`;
+    case 'crossfader':
+      return `A↔B ${Math.round(Number(p.balance ?? 0.5) * 100)}% · ${String(p.curve ?? 'equalPower')}`;
     case 'chorus':
       return `${Number(p.voices ?? 4)}-tap · ${Number(p.rate ?? 0.42).toFixed(2)} Hz · ${Math.round(Number(p.mix ?? 0.52) * 100)}%`;
     case 'granularCloud': {
@@ -328,7 +338,12 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     'combFilter',
     'filter',
     'parametricEq',
+    'formantFilter',
     'shaper',
+    'wavefolder',
+    'ringMod',
+    'bitcrusher',
+    'crossfader',
     'chorus',
     'granularCloud',
     'envelope',

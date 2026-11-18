@@ -100,6 +100,36 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'outputGain', label: 'EQ Output Level' },
   ],
   shaper: [{ key: 'mix', label: 'Warmth Mix' }],
+  formantFilter: [
+    { key: 'vowel', label: 'Vowel (Ah–Oo)' },
+    { key: 'shift', label: 'Formant Shift' },
+    { key: 'resonance', label: 'Formant Q' },
+    { key: 'spread', label: 'Peak Spread' },
+    { key: 'mix', label: 'Formant Wet Mix' },
+  ],
+  wavefolder: [
+    { key: 'folds', label: 'Fold Drive' },
+    { key: 'symmetry', label: 'Symmetry Bias' },
+    { key: 'postTone', label: 'Smoothing Tone' },
+    { key: 'mix', label: 'Folder Wet Mix' },
+  ],
+  ringMod: [
+    { key: 'frequency', label: 'Mod Oscillator Pitch' },
+    { key: 'drive', label: 'Mod Drive' },
+    { key: 'mix', label: 'Ring Mod Mix' },
+  ],
+  bitcrusher: [
+    { key: 'bits', label: 'Bit Depth' },
+    { key: 'downsample', label: 'Sample Hold' },
+    { key: 'postTone', label: 'Post Warmth Cut' },
+    { key: 'mix', label: 'Crush Wet Mix' },
+  ],
+  crossfader: [
+    { key: 'balance', label: 'A ↔ B Balance' },
+    { key: 'gainA', label: 'Input A Trim' },
+    { key: 'gainB', label: 'Input B Trim' },
+    { key: 'outputGain', label: 'Output Gain' },
+  ],
   chorus: [
     { key: 'rate', label: 'Ensemble Rate' },
     { key: 'depth', label: 'Ensemble Depth' },

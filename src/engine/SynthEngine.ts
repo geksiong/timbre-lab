@@ -10,6 +10,7 @@ import {
 } from './types';
 import {
   ALTERNATIVE_CARRIER_WORKLET_CODE,
+  FORMANT_VOWELS,
   WAVETABLE_BANK_INDEX,
   computeCarrierPreviewSamples,
   isAlternativeCarrierWaveform,
@@ -21,6 +22,11 @@ import {
   PIPE_BORE_INDEX,
   SOURCE_WORKLET_CODE,
 } from './sourceWorklets';
+import {
+  CROSSFADE_CURVE_INDEX,
+  PROCESSOR_WORKLET_CODE,
+  RINGMOD_MODE_INDEX,
+} from './processorWorklets';
 
 const KARPLUS_WORKLET_CODE = `
 class KarplusStrongProcessor extends AudioWorkletProcessor {
@@ -512,6 +518,7 @@ registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
 ${SOURCE_WORKLET_CODE}
+${PROCESSOR_WORKLET_CODE}
 `;
 
 interface ActiveVoice {
@@ -2018,6 +2025,7 @@ export class SynthEngine {
       if (node.bypassed) {
         const pass = track(ctx.createGain());
         audioInputs.set(`${node.id}:in`, pass);
+        audioInputs.set(`${node.id}:inA`, pass);
         audioOutputs.set(`${node.id}:out`, pass);
         continue;
       }
@@ -3315,6 +3323,532 @@ export class SynthEngine {
           audioOutputs.set(`${node.id}:out`, outBus);
           modParamTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.6 });
           nodeControllers.set(node.id, { type: 'shaper', updateParams: applyShaper });
+          break;
+        }
+
+        case 'formantFilter': {
+          const inBus = track(ctx.createGain());
+          const outBus = track(ctx.createGain());
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-formant-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [2],
+                  channelCount: 2,
+                  channelCountMode: 'explicit',
+                  channelInterpretation: 'speakers',
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              inBus.connect(worklet);
+              worklet.connect(outBus);
+
+              const vowelParam = worklet.parameters.get('vowel')!;
+              const shiftParam = worklet.parameters.get('shift')!;
+              const resParam = worklet.parameters.get('resonance')!;
+              const spreadParam = worklet.parameters.get('spread')!;
+              const mixParam = worklet.parameters.get('mix')!;
+
+              const applyFormant = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(vowelParam, clampFinite(merged.vowel, 0, 4, 0.5), t, 0.01, immediate);
+                setAudioParam(shiftParam, clampFinite(merged.shift, -12, 12, 0), t, 0.01, immediate);
+                resParam.setValueAtTime(clampFinite(merged.resonance, 1.5, 24, 7.5), t);
+                spreadParam.setValueAtTime(clampFinite(merged.spread, 0.5, 1.6, 1.0), t);
+                mixParam.setValueAtTime(clampFinite(merged.mix, 0, 1, 0.9), t);
+              };
+
+              applyFormant(node.params, now, true);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:in`, inBus);
+              audioOutputs.set(`${node.id}:out`, outBus);
+              cvTargets.set(`${node.id}:vowel`, { param: vowelParam, baseScale: 2.0 });
+              cvTargets.set(`${node.id}:shift`, { param: shiftParam, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:vowel`, { param: vowelParam, baseScale: 2.0 });
+              modParamTargets.set(`${node.id}:shift`, { param: shiftParam, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:resonance`, { param: resParam, baseScale: 6.0 });
+              modParamTargets.set(`${node.id}:spread`, { param: spreadParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:mix`, { param: mixParam, baseScale: 0.6 });
+              nodeControllers.set(node.id, { type: 'formantFilter', updateParams: applyFormant });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+          if (!usedWorklet) {
+            const dry = track(ctx.createGain());
+            const wet = track(ctx.createGain());
+            const b1 = track(ctx.createBiquadFilter());
+            const b2 = track(ctx.createBiquadFilter());
+            const b3 = track(ctx.createBiquadFilter());
+            const g1 = track(ctx.createGain());
+            const g2 = track(ctx.createGain());
+            const g3 = track(ctx.createGain());
+            [b1, b2, b3].forEach((b) => {
+              b.type = 'bandpass';
+              inBus.connect(b);
+            });
+            b1.connect(g1); b2.connect(g2); b3.connect(g3);
+            g1.connect(wet); g2.connect(wet); g3.connect(wet);
+            inBus.connect(dry); dry.connect(outBus); wet.connect(outBus);
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const vPos = clampFinite(merged.vowel, 0, 4, 0.5);
+              const shiftMul = Math.pow(2, clampFinite(merged.shift, -12, 12, 0) / 12);
+              const q = clampFinite(merged.resonance, 1.5, 24, 7.5);
+              const spread = clampFinite(merged.spread, 0.5, 1.6, 1.0);
+              const mix = clampFinite(merged.mix, 0, 1, 0.9);
+              const i0 = Math.min(3, Math.floor(vPos));
+              const i1 = Math.min(4, i0 + 1);
+              const f = vPos - i0;
+              const v0 = FORMANT_VOWELS[i0], v1 = FORMANT_VOWELS[i1];
+              const maxHz = Math.min(12000, ctx.sampleRate * 0.36);
+              setAudioParam(b1.frequency, clampFinite((v0.f1 * (1 - f) + v1.f1 * f) * shiftMul, 80, maxHz, 500), t, 0.01, immediate);
+              setAudioParam(b2.frequency, clampFinite((v0.f2 * (1 - f) + v1.f2 * f) * shiftMul * spread, 120, maxHz, 1200), t, 0.01, immediate);
+              setAudioParam(b3.frequency, clampFinite((v0.f3 * (1 - f) + v1.f3 * f) * shiftMul * (0.5 + spread * 0.5), 200, maxHz, 2500), t, 0.01, immediate);
+              [b1, b2, b3].forEach((b) => setAudioParam(b.Q, q, t, 0.01, immediate));
+              setAudioParam(g1.gain, v0.g1 * (1 - f) + v1.g1 * f, t, 0.01, immediate);
+              setAudioParam(g2.gain, v0.g2 * (1 - f) + v1.g2 * f, t, 0.01, immediate);
+              setAudioParam(g3.gain, v0.g3 * (1 - f) + v1.g3 * f, t, 0.01, immediate);
+              setAudioParam(dry.gain, 1 - mix, t, 0.01, immediate);
+              setAudioParam(wet.gain, mix * 1.6, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            audioInputs.set(`${node.id}:in`, inBus);
+            audioOutputs.set(`${node.id}:out`, outBus);
+            cvTargets.set(`${node.id}:vowel`, { param: b2.detune, baseScale: 1800 });
+            cvTargets.set(`${node.id}:shift`, { param: b1.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:vowel`, { param: b2.detune, baseScale: 1800 });
+            modParamTargets.set(`${node.id}:shift`, { param: b1.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.8 });
+            nodeControllers.set(node.id, { type: 'formantFilter', updateParams: applyFallback });
+          }
+          break;
+        }
+
+        case 'wavefolder': {
+          const inBus = track(ctx.createGain());
+          const outBus = track(ctx.createGain());
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-wavefolder-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [2],
+                  channelCount: 2,
+                  channelCountMode: 'explicit',
+                  channelInterpretation: 'speakers',
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              inBus.connect(worklet);
+              worklet.connect(outBus);
+
+              const foldsParam = worklet.parameters.get('folds')!;
+              const symParam = worklet.parameters.get('symmetry')!;
+              const stagesParam = worklet.parameters.get('stages')!;
+              const toneParam = worklet.parameters.get('postTone')!;
+              const mixParam = worklet.parameters.get('mix')!;
+
+              const applyFolder = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(foldsParam, clampFinite(merged.folds, 1, 8, 2.4), t, 0.01, immediate);
+                setAudioParam(symParam, clampFinite(merged.symmetry, -0.65, 0.65, 0), t, 0.01, immediate);
+                stagesParam.setValueAtTime(Math.max(1, Math.min(4, Math.round(finiteNum(merged.stages, 2)))), t);
+                toneParam.setValueAtTime(clampFinite(merged.postTone, 400, 16000, 7200), t);
+                mixParam.setValueAtTime(clampFinite(merged.mix, 0, 1, 0.85), t);
+              };
+
+              applyFolder(node.params, now, true);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:in`, inBus);
+              audioOutputs.set(`${node.id}:out`, outBus);
+              cvTargets.set(`${node.id}:fold`, { param: foldsParam, baseScale: 3.5 });
+              cvTargets.set(`${node.id}:symmetry`, { param: symParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:folds`, { param: foldsParam, baseScale: 3.5 });
+              modParamTargets.set(`${node.id}:symmetry`, { param: symParam, baseScale: 0.4 });
+              modParamTargets.set(`${node.id}:postTone`, { param: toneParam, baseScale: 4000 });
+              modParamTargets.set(`${node.id}:mix`, { param: mixParam, baseScale: 0.6 });
+              nodeControllers.set(node.id, { type: 'wavefolder', updateParams: applyFolder });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+          if (!usedWorklet) {
+            const dry = track(ctx.createGain());
+            const wet = track(ctx.createGain());
+            const driveIn = track(ctx.createGain());
+            const ws = track(ctx.createWaveShaper());
+            const lp = track(ctx.createBiquadFilter());
+            lp.type = 'lowpass';
+            ws.oversample = '4x';
+            const foldCurve = new Float32Array(1024);
+            for (let i = 0; i < 1024; i++) {
+              const x = (i * 2) / 1023 - 1;
+              foldCurve[i] = Math.sin(x * Math.PI * 2.5);
+            }
+            ws.curve = foldCurve;
+            inBus.connect(dry); dry.connect(outBus);
+            inBus.connect(driveIn); driveIn.connect(ws); ws.connect(lp); lp.connect(wet); wet.connect(outBus);
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const mix = clampFinite(merged.mix, 0, 1, 0.85);
+              setAudioParam(driveIn.gain, clampFinite(merged.folds, 1, 8, 2.4) * 0.45, t, 0.01, immediate);
+              setAudioParam(lp.frequency, clampFinite(merged.postTone, 400, 15000, 7200), t, 0.01, immediate);
+              setAudioParam(dry.gain, 1 - mix, t, 0.01, immediate);
+              setAudioParam(wet.gain, mix * 0.85, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            audioInputs.set(`${node.id}:in`, inBus);
+            audioOutputs.set(`${node.id}:out`, outBus);
+            cvTargets.set(`${node.id}:fold`, { param: driveIn.gain, baseScale: 1.5 });
+            modParamTargets.set(`${node.id}:folds`, { param: driveIn.gain, baseScale: 1.5 });
+            modParamTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.6 });
+            nodeControllers.set(node.id, { type: 'wavefolder', updateParams: applyFallback });
+          }
+          break;
+        }
+
+        case 'ringMod': {
+          const carIn = track(ctx.createGain());
+          const extModIn = track(ctx.createGain());
+          const modSum = track(ctx.createGain());
+          const intModGain = track(ctx.createGain());
+          const extModGain = track(ctx.createGain());
+          const modOsc = track(ctx.createOscillator());
+          const outBus = track(ctx.createGain());
+
+          modOsc.connect(intModGain);
+          intModGain.connect(modSum);
+          extModIn.connect(extModGain);
+          extModGain.connect(modSum);
+
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-ringmod-processor', {
+                  numberOfInputs: 2,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [2],
+                  channelCount: 2,
+                  channelCountMode: 'explicit',
+                  channelInterpretation: 'speakers',
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              carIn.connect(worklet, 0, 0);
+              modSum.connect(worklet, 0, 1);
+              worklet.connect(outBus);
+
+              const modeParam = worklet.parameters.get('mode')!;
+              const driveParam = worklet.parameters.get('drive')!;
+              const mixParam = worklet.parameters.get('mix')!;
+
+              const applyRing = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                const modSource = String(merged.modSource ?? 'internal');
+                const tuneMode = String(merged.tuneMode ?? 'keyTrack');
+                const ratio = clampFinite(merged.ratio, 0.125, 8.0, 1.41);
+                const fixedHz = clampFinite(merged.frequency, 20, 4000, 320);
+                const oscFreq = tuneMode === 'freeHz' ? fixedHz : clampFinite(baseFreq * ratio, 15, 16000, 320);
+
+                modOsc.type = safeOscType(merged.waveform, 'sine');
+                setAudioParam(modOsc.frequency, oscFreq, t, 0.005, immediate);
+                setAudioParam(intModGain.gain, modSource === 'external' ? 0 : 1, t, 0.01, immediate);
+                setAudioParam(extModGain.gain, modSource === 'internal' ? 0 : 1, t, 0.01, immediate);
+                modeParam.setValueAtTime(RINGMOD_MODE_INDEX[String(merged.mode ?? 'ring')] ?? 0, t);
+                driveParam.setValueAtTime(clampFinite(merged.drive, 0.3, 3.0, 1.0), t);
+                setAudioParam(mixParam, clampFinite(merged.mix, 0, 1, 0.75), t, 0.01, immediate);
+              };
+
+              applyRing(node.params, now, true);
+              modOsc.start(now);
+              stopCallbacks.push(() => {
+                modOsc.stop();
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:in`, carIn);
+              audioInputs.set(`${node.id}:mod`, extModIn);
+              audioOutputs.set(`${node.id}:out`, outBus);
+              cvTargets.set(`${node.id}:freq`, { param: modOsc.detune, baseScale: 1200 });
+              cvTargets.set(`${node.id}:mix`, { param: mixParam, baseScale: 0.6 });
+              modParamTargets.set(`${node.id}:frequency`, { param: modOsc.detune, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:ratio`, { param: modOsc.detune, baseScale: 1200 });
+              modParamTargets.set(`${node.id}:drive`, { param: driveParam, baseScale: 0.8 });
+              modParamTargets.set(`${node.id}:mix`, { param: mixParam, baseScale: 0.6 });
+              nodeControllers.set(node.id, { type: 'ringMod', updateParams: applyRing });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const dry = track(ctx.createGain());
+            const wet = track(ctx.createGain());
+            const mulNode = track(ctx.createGain());
+            mulNode.gain.value = 0;
+            carIn.connect(dry); dry.connect(outBus);
+            carIn.connect(mulNode);
+            modSum.connect(mulNode.gain);
+            mulNode.connect(wet); wet.connect(outBus);
+
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const modSource = String(merged.modSource ?? 'internal');
+              const tuneMode = String(merged.tuneMode ?? 'keyTrack');
+              const ratio = clampFinite(merged.ratio, 0.125, 8.0, 1.41);
+              const fixedHz = clampFinite(merged.frequency, 20, 4000, 320);
+              const oscFreq = tuneMode === 'freeHz' ? fixedHz : clampFinite(baseFreq * ratio, 15, 16000, 320);
+              const mix = clampFinite(merged.mix, 0, 1, 0.75);
+              modOsc.type = safeOscType(merged.waveform, 'sine');
+              setAudioParam(modOsc.frequency, oscFreq, t, 0.005, immediate);
+              setAudioParam(intModGain.gain, modSource === 'external' ? 0 : clampFinite(merged.drive, 0.3, 3.0, 1.0), t, 0.01, immediate);
+              setAudioParam(extModGain.gain, modSource === 'internal' ? 0 : clampFinite(merged.drive, 0.3, 3.0, 1.0), t, 0.01, immediate);
+              setAudioParam(dry.gain, 1 - mix, t, 0.01, immediate);
+              setAudioParam(wet.gain, mix, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            modOsc.start(now);
+            stopCallbacks.push(() => modOsc.stop());
+            audioInputs.set(`${node.id}:in`, carIn);
+            audioInputs.set(`${node.id}:mod`, extModIn);
+            audioOutputs.set(`${node.id}:out`, outBus);
+            cvTargets.set(`${node.id}:freq`, { param: modOsc.detune, baseScale: 1200 });
+            cvTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.6 });
+            modParamTargets.set(`${node.id}:frequency`, { param: modOsc.detune, baseScale: 1200 });
+            modParamTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.6 });
+            nodeControllers.set(node.id, { type: 'ringMod', updateParams: applyFallback });
+          }
+          break;
+        }
+
+        case 'bitcrusher': {
+          const inBus = track(ctx.createGain());
+          const outBus = track(ctx.createGain());
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-bitcrusher-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [2],
+                  channelCount: 2,
+                  channelCountMode: 'explicit',
+                  channelInterpretation: 'speakers',
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              inBus.connect(worklet);
+              worklet.connect(outBus);
+
+              const bitsParam = worklet.parameters.get('bits')!;
+              const dsParam = worklet.parameters.get('downsample')!;
+              const ditherParam = worklet.parameters.get('dither')!;
+              const toneParam = worklet.parameters.get('postTone')!;
+              const mixParam = worklet.parameters.get('mix')!;
+
+              const applyCrush = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(bitsParam, clampFinite(merged.bits, 2, 16, 8), t, 0.01, immediate);
+                setAudioParam(dsParam, clampFinite(merged.downsample, 1, 32, 4), t, 0.01, immediate);
+                ditherParam.setValueAtTime(clampFinite(merged.dither, 0, 1, 0.12), t);
+                toneParam.setValueAtTime(clampFinite(merged.postTone, 400, 16000, 9500), t);
+                mixParam.setValueAtTime(clampFinite(merged.mix, 0, 1, 0.8), t);
+              };
+
+              applyCrush(node.params, now, true);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:in`, inBus);
+              audioOutputs.set(`${node.id}:out`, outBus);
+              cvTargets.set(`${node.id}:bits`, { param: bitsParam, baseScale: 6.0 });
+              cvTargets.set(`${node.id}:rate`, { param: dsParam, baseScale: 12.0 });
+              modParamTargets.set(`${node.id}:bits`, { param: bitsParam, baseScale: 6.0 });
+              modParamTargets.set(`${node.id}:downsample`, { param: dsParam, baseScale: 12.0 });
+              modParamTargets.set(`${node.id}:postTone`, { param: toneParam, baseScale: 4500 });
+              modParamTargets.set(`${node.id}:mix`, { param: mixParam, baseScale: 0.6 });
+              nodeControllers.set(node.id, { type: 'bitcrusher', updateParams: applyCrush });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+          if (!usedWorklet) {
+            const dry = track(ctx.createGain());
+            const wet = track(ctx.createGain());
+            const ws = track(ctx.createWaveShaper());
+            const lp = track(ctx.createBiquadFilter());
+            lp.type = 'lowpass';
+            inBus.connect(dry); dry.connect(outBus);
+            inBus.connect(ws); ws.connect(lp); lp.connect(wet); wet.connect(outBus);
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const bits = clampFinite(merged.bits, 2, 16, 8);
+              const levels = Math.pow(2, bits - 1);
+              const curve = new Float32Array(1024);
+              for (let i = 0; i < 1024; i++) {
+                const x = (i * 2) / 1023 - 1;
+                curve[i] = Math.round(x * levels) / levels;
+              }
+              ws.curve = curve;
+              const mix = clampFinite(merged.mix, 0, 1, 0.8);
+              setAudioParam(lp.frequency, clampFinite(merged.postTone, 400, 16000, 9500), t, 0.01, immediate);
+              setAudioParam(dry.gain, 1 - mix, t, 0.01, immediate);
+              setAudioParam(wet.gain, mix, t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            audioInputs.set(`${node.id}:in`, inBus);
+            audioOutputs.set(`${node.id}:out`, outBus);
+            modParamTargets.set(`${node.id}:mix`, { param: wet.gain, baseScale: 0.6 });
+            nodeControllers.set(node.id, { type: 'bitcrusher', updateParams: applyFallback });
+          }
+          break;
+        }
+
+        case 'crossfader': {
+          const inA = track(ctx.createGain());
+          const inB = track(ctx.createGain());
+          const ampCvTarget = track(ctx.createGain());
+          ampCvTarget.gain.value = 1;
+
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-crossfader-processor', {
+                  numberOfInputs: 2,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [2],
+                  channelCount: 2,
+                  channelCountMode: 'explicit',
+                  channelInterpretation: 'speakers',
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              inA.connect(worklet, 0, 0);
+              inB.connect(worklet, 0, 1);
+              worklet.connect(ampCvTarget);
+
+              const balParam = worklet.parameters.get('balance')!;
+              const curveParam = worklet.parameters.get('curve')!;
+              const gainAParam = worklet.parameters.get('gainA')!;
+              const gainBParam = worklet.parameters.get('gainB')!;
+              const outGainParam = worklet.parameters.get('outputGain')!;
+
+              const applyCross = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(balParam, clampFinite(merged.balance, 0, 1, 0.5), t, 0.01, immediate);
+                curveParam.setValueAtTime(CROSSFADE_CURVE_INDEX[String(merged.curve ?? 'equalPower')] ?? 0, t);
+                gainAParam.setValueAtTime(clampFinite(merged.gainA, 0, 1.5, 1.0), t);
+                gainBParam.setValueAtTime(clampFinite(merged.gainB, 0, 1.5, 1.0), t);
+                setAudioParam(outGainParam, clampFinite(merged.outputGain, 0, 1.5, 1.0), t, 0.01, immediate);
+              };
+
+              applyCross(node.params, now, true);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              audioInputs.set(`${node.id}:inA`, inA);
+              audioInputs.set(`${node.id}:inB`, inB);
+              audioOutputs.set(`${node.id}:out`, ampCvTarget);
+              cvTargets.set(`${node.id}:fade`, { param: balParam, baseScale: 0.5 });
+              cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+              modParamTargets.set(`${node.id}:balance`, { param: balParam, baseScale: 0.5 });
+              modParamTargets.set(`${node.id}:gainA`, { param: gainAParam, baseScale: 0.6 });
+              modParamTargets.set(`${node.id}:gainB`, { param: gainBParam, baseScale: 0.6 });
+              modParamTargets.set(`${node.id}:outputGain`, { param: outGainParam, baseScale: 0.6 });
+              nodeControllers.set(node.id, { type: 'crossfader', updateParams: applyCross });
+              usedWorklet = true;
+            } catch {
+              this.workletReady = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const gA = track(ctx.createGain());
+            const gB = track(ctx.createGain());
+            const outTrim = track(ctx.createGain());
+            const fadeConst = track(ctx.createConstantSource());
+            fadeConst.offset.value = 0;
+            fadeConst.start(now);
+            stopCallbacks.push(() => fadeConst.stop());
+            const invA = track(ctx.createGain());
+            invA.gain.value = -1;
+            fadeConst.connect(invA);
+            invA.connect(gA.gain);
+            fadeConst.connect(gB.gain);
+            inA.connect(gA); gA.connect(outTrim);
+            inB.connect(gB); gB.connect(outTrim);
+            outTrim.connect(ampCvTarget);
+
+            const applyFallback = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
+              const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+              const bal = clampFinite(merged.balance, 0, 1, 0.5);
+              const gAval = clampFinite(merged.gainA, 0, 1.5, 1.0);
+              const gBval = clampFinite(merged.gainB, 0, 1.5, 1.0);
+              setAudioParam(gA.gain, Math.cos(bal * Math.PI * 0.5) * gAval, t, 0.01, immediate);
+              setAudioParam(gB.gain, Math.sin(bal * Math.PI * 0.5) * gBval, t, 0.01, immediate);
+              setAudioParam(outTrim.gain, clampFinite(merged.outputGain, 0, 1.5, 1.0), t, 0.01, immediate);
+            };
+            applyFallback(node.params, now, true);
+            audioInputs.set(`${node.id}:inA`, inA);
+            audioInputs.set(`${node.id}:inB`, inB);
+            audioOutputs.set(`${node.id}:out`, ampCvTarget);
+            cvTargets.set(`${node.id}:fade`, { param: fadeConst.offset, baseScale: 0.5 });
+            cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
+            modParamTargets.set(`${node.id}:balance`, { param: fadeConst.offset, baseScale: 0.5 });
+            modParamTargets.set(`${node.id}:outputGain`, { param: outTrim.gain, baseScale: 0.6 });
+            nodeControllers.set(node.id, { type: 'crossfader', updateParams: applyFallback });
+          }
           break;
         }
 

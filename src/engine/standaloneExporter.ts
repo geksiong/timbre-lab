@@ -1,5 +1,6 @@
 import { ALTERNATIVE_CARRIER_WORKLET_CODE } from './carrierWaves';
 import { SOURCE_WORKLET_CODE } from './sourceWorklets';
+import { PROCESSOR_WORKLET_CODE } from './processorWorklets';
 
 export function generateStandaloneEngineSource(): string {
   return `/**
@@ -384,6 +385,7 @@ registerProcessor('timbre-granular-processor', GranularCloudProcessor);
 registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
 ${SOURCE_WORKLET_CODE}
+${PROCESSOR_WORKLET_CODE}
 \`;
 
 const VALID_OSC_TYPES = new Set(['sine', 'square', 'sawtooth', 'triangle']);
@@ -391,6 +393,8 @@ const ALT_CARRIER_MODES = { pulse: 0, filteredNoise: 1, customHarmonics: 2, voca
 const WT_BANK_MAP = { analog: 0, vocal: 1, bell: 2, bowed: 3, digital: 4, sub: 5 };
 const MODAL_MAT_MAP = { marimba: 0, bell: 1, kalimba: 2, steelDrum: 3, plate: 4, harmonic: 5 };
 const PIPE_BORE_MAP = { flute: 0, clarinet: 1, reed: 2, organPipe: 3 };
+const CROSSFADE_MAP = { equalPower: 0, linear: 1, blendSum: 2 };
+const RINGMOD_MAP = { ring: 0, am: 1, rectified: 2 };
 const VALID_FILTER_TYPES = new Set(['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']);
 
 function parseHarmonicsArr(raw) {
@@ -868,7 +872,7 @@ export class TimbreLabSynth {
       if (node.type === 'delay' || node.type === 'reverb' || node.type === 'output') continue;
       if (node.bypassed) {
         const g = track(ctx.createGain());
-        audioIn.set(node.id + ':in', g); audioOut.set(node.id + ':out', g);
+        audioIn.set(node.id + ':in', g); audioIn.set(node.id + ':inA', g); audioOut.set(node.id + ':out', g);
         continue;
       }
       const p = node.params || {};
@@ -1249,6 +1253,98 @@ export class TimbreLabSynth {
         inp.connect(dry); dry.connect(out); inp.connect(ws); ws.connect(wet); wet.connect(out);
         audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
         modTargets.set(node.id + ':mix', { param: wet.gain, scale: 0.6 });
+      } else if (node.type === 'formantFilter') {
+        const inp = track(ctx.createGain()), out = track(ctx.createGain());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-formant-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            inp.connect(w); w.connect(out);
+            const vp = w.parameters.get('vowel'), sp = w.parameters.get('shift'), rp = w.parameters.get('resonance'), spp = w.parameters.get('spread'), mp = w.parameters.get('mix');
+            vp.value = clampFinite(p.vowel, 0, 4, 0.5); sp.value = clampFinite(p.shift, -12, 12, 0); rp.value = clampFinite(p.resonance, 1.5, 24, 7.5); spp.value = clampFinite(p.spread, 0.5, 1.6, 1.0); mp.value = clampFinite(p.mix, 0, 1, 0.9);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            cvTarget.set(node.id + ':vowel', { param: vp, scale: 2.0 }); cvTarget.set(node.id + ':shift', { param: sp, scale: 8.0 });
+            modTargets.set(node.id + ':vowel', { param: vp, scale: 2.0 }); modTargets.set(node.id + ':shift', { param: sp, scale: 8.0 }); modTargets.set(node.id + ':resonance', { param: rp, scale: 6.0 }); modTargets.set(node.id + ':spread', { param: spp, scale: 0.4 }); modTargets.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) inp.connect(out);
+        audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
+      } else if (node.type === 'wavefolder') {
+        const inp = track(ctx.createGain()), out = track(ctx.createGain());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-wavefolder-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            inp.connect(w); w.connect(out);
+            const fp = w.parameters.get('folds'), sp = w.parameters.get('symmetry'), stp = w.parameters.get('stages'), tp = w.parameters.get('postTone'), mp = w.parameters.get('mix');
+            fp.value = clampFinite(p.folds, 1, 8, 2.4); sp.value = clampFinite(p.symmetry, -0.65, 0.65, 0); stp.value = Math.max(1, Math.min(4, Math.round(Number(p.stages) || 2))); tp.value = clampFinite(p.postTone, 400, 16000, 7200); mp.value = clampFinite(p.mix, 0, 1, 0.85);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            cvTarget.set(node.id + ':fold', { param: fp, scale: 3.5 }); cvTarget.set(node.id + ':symmetry', { param: sp, scale: 0.4 });
+            modTargets.set(node.id + ':folds', { param: fp, scale: 3.5 }); modTargets.set(node.id + ':symmetry', { param: sp, scale: 0.4 }); modTargets.set(node.id + ':postTone', { param: tp, scale: 4000 }); modTargets.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) inp.connect(out);
+        audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
+      } else if (node.type === 'ringMod') {
+        const carIn = track(ctx.createGain()), extIn = track(ctx.createGain()), modSum = track(ctx.createGain()), intG = track(ctx.createGain()), extG = track(ctx.createGain()), modOsc = track(ctx.createOscillator()), out = track(ctx.createGain());
+        const modSource = String(p.modSource || 'internal'), tuneMode = String(p.tuneMode || 'keyTrack');
+        const oscFreq = tuneMode === 'freeHz' ? clampFinite(p.frequency, 20, 4000, 320) : clampFinite(baseFreq * clampFinite(p.ratio, 0.125, 8.0, 1.41), 15, nyquistSafe, 320);
+        modOsc.type = safeOscType(p.waveform, 'sine'); modOsc.frequency.value = oscFreq;
+        intG.gain.value = modSource === 'external' ? 0 : 1; extG.gain.value = modSource === 'internal' ? 0 : 1;
+        modOsc.connect(intG); intG.connect(modSum); extIn.connect(extG); extG.connect(modSum);
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-ringmod-processor', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            carIn.connect(w, 0, 0); modSum.connect(w, 0, 1); w.connect(out);
+            const mp = w.parameters.get('mix'), dp = w.parameters.get('drive');
+            w.parameters.get('mode').value = RINGMOD_MAP[String(p.mode || 'ring')] ?? 0;
+            dp.value = clampFinite(p.drive, 0.3, 3.0, 1.0); mp.value = clampFinite(p.mix, 0, 1, 0.75);
+            modOsc.start(now); stops.push(() => { modOsc.stop(); try { w.port.postMessage('stop'); } catch {} });
+            cvTarget.set(node.id + ':freq', { param: modOsc.detune, scale: 1200 }); cvTarget.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            modTargets.set(node.id + ':frequency', { param: modOsc.detune, scale: 1200 }); modTargets.set(node.id + ':ratio', { param: modOsc.detune, scale: 1200 }); modTargets.set(node.id + ':drive', { param: dp, scale: 0.8 }); modTargets.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) { modOsc.start(now); stops.push(() => modOsc.stop()); carIn.connect(out); }
+        audioIn.set(node.id + ':in', carIn); audioIn.set(node.id + ':mod', extIn); audioOut.set(node.id + ':out', out);
+      } else if (node.type === 'bitcrusher') {
+        const inp = track(ctx.createGain()), out = track(ctx.createGain());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-bitcrusher-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            inp.connect(w); w.connect(out);
+            const bp = w.parameters.get('bits'), dp = w.parameters.get('downsample'), tp = w.parameters.get('postTone'), mp = w.parameters.get('mix');
+            bp.value = clampFinite(p.bits, 2, 16, 8); dp.value = clampFinite(p.downsample, 1, 32, 4); w.parameters.get('dither').value = clampFinite(p.dither, 0, 1, 0.12); tp.value = clampFinite(p.postTone, 400, 16000, 9500); mp.value = clampFinite(p.mix, 0, 1, 0.8);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            cvTarget.set(node.id + ':bits', { param: bp, scale: 6.0 }); cvTarget.set(node.id + ':rate', { param: dp, scale: 12.0 });
+            modTargets.set(node.id + ':bits', { param: bp, scale: 6.0 }); modTargets.set(node.id + ':downsample', { param: dp, scale: 12.0 }); modTargets.set(node.id + ':postTone', { param: tp, scale: 4500 }); modTargets.set(node.id + ':mix', { param: mp, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) inp.connect(out);
+        audioIn.set(node.id + ':in', inp); audioOut.set(node.id + ':out', out);
+      } else if (node.type === 'crossfader') {
+        const inA = track(ctx.createGain()), inB = track(ctx.createGain()), amp = track(ctx.createGain());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-crossfader-processor', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }));
+            inA.connect(w, 0, 0); inB.connect(w, 0, 1); w.connect(amp);
+            const bp = w.parameters.get('balance'), ga = w.parameters.get('gainA'), gb = w.parameters.get('gainB'), og = w.parameters.get('outputGain');
+            bp.value = clampFinite(p.balance, 0, 1, 0.5); w.parameters.get('curve').value = CROSSFADE_MAP[String(p.curve || 'equalPower')] ?? 0; ga.value = clampFinite(p.gainA, 0, 1.5, 1.0); gb.value = clampFinite(p.gainB, 0, 1.5, 1.0); og.value = clampFinite(p.outputGain, 0, 1.5, 1.0);
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            cvTarget.set(node.id + ':fade', { param: bp, scale: 0.5 });
+            modTargets.set(node.id + ':balance', { param: bp, scale: 0.5 }); modTargets.set(node.id + ':gainA', { param: ga, scale: 0.6 }); modTargets.set(node.id + ':gainB', { param: gb, scale: 0.6 }); modTargets.set(node.id + ':outputGain', { param: og, scale: 0.6 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) { inA.connect(amp); inB.connect(amp); }
+        audioIn.set(node.id + ':inA', inA); audioIn.set(node.id + ':inB', inB); audioOut.set(node.id + ':out', amp);
+        cvTarget.set(node.id + ':amp', { param: amp.gain, scale: 0.75 });
       } else if (node.type === 'chorus') {
         const inp = track(ctx.createGain()), out = track(ctx.createGain()), dry = track(ctx.createGain()), wet = track(ctx.createGain()), lp = track(ctx.createBiquadFilter());
         lp.type = 'lowpass'; lp.frequency.value = clampFinite(p.tone, 400, 14000, 6400);
