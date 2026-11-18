@@ -27,6 +27,12 @@ import {
   PROCESSOR_WORKLET_CODE,
   RINGMOD_MODE_INDEX,
 } from './processorWorklets';
+import {
+  MODULATOR_WORKLET_CODE,
+  SEQ_DIR_INDEX,
+  SH_MODE_INDEX,
+  SLOPE_MODE_INDEX,
+} from './modulatorWorklets';
 
 const KARPLUS_WORKLET_CODE = `
 class KarplusStrongProcessor extends AudioWorkletProcessor {
@@ -519,6 +525,7 @@ registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
 ${SOURCE_WORKLET_CODE}
 ${PROCESSOR_WORKLET_CODE}
+${MODULATOR_WORKLET_CODE}
 `;
 
 interface ActiveVoice {
@@ -4215,6 +4222,397 @@ export class SynthEngine {
             updateParams: applyLfo,
             setModWheel: (_mw, t) => applyLfo({}, t),
           });
+          break;
+        }
+
+        case 'sampleHold': {
+          const sampleInConst = track(ctx.createConstantSource());
+          sampleInConst.offset.value = 0;
+          sampleInConst.start(now);
+          stopCallbacks.push(() => sampleInConst.stop());
+
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-samplehold-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              sampleInConst.connect(worklet);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              const modeParam = worklet.parameters.get('mode')!;
+              const rateParam = worklet.parameters.get('rate')!;
+              const slewParam = worklet.parameters.get('slew')!;
+              const depthParam = worklet.parameters.get('depth')!;
+              const uniParam = worklet.parameters.get('unipolar')!;
+              const seedParam = worklet.parameters.get('seed')!;
+              seedParam.setValueAtTime(1000 + ((this.voiceCounter * 7919) % 90000), now);
+
+              const applySh = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                modeParam.setValueAtTime(
+                  SH_MODE_INDEX[String(merged.sourceMode ?? 'random')] ?? 0,
+                  t
+                );
+                setAudioParam(
+                  rateParam,
+                  clampFinite(merged.rate, 0.2, 30, 4.5),
+                  t,
+                  0.01,
+                  immediate
+                );
+                setAudioParam(slewParam, clampFinite(merged.slew, 0, 1, 0.15), t, 0.01, immediate);
+                setAudioParam(
+                  depthParam,
+                  clampFinite(merged.depth, 0, 1.5, 0.65),
+                  t,
+                  0.01,
+                  immediate
+                );
+                uniParam.setValueAtTime(merged.unipolar ? 1 : 0, t);
+              };
+
+              applySh(node.params, now, true);
+
+              cvOutputs.set(`${node.id}:cv`, worklet);
+              cvTargets.set(`${node.id}:in`, { param: sampleInConst.offset, baseScale: 1.0 });
+              cvTargets.set(`${node.id}:rate`, { param: rateParam, baseScale: 10.0 });
+              modParamTargets.set(`${node.id}:rate`, { param: rateParam, baseScale: 10.0 });
+              modParamTargets.set(`${node.id}:slew`, { param: slewParam, baseScale: 0.5 });
+              modParamTargets.set(`${node.id}:depth`, { param: depthParam, baseScale: 0.65 });
+
+              nodeControllers.set(node.id, {
+                type: 'sampleHold',
+                updateParams: applySh,
+              });
+              usedWorklet = true;
+            } catch {
+              usedWorklet = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const fbConst = track(ctx.createConstantSource());
+            fbConst.offset.value = (Math.random() * 2 - 1) * clampFinite(node.params.depth, 0, 1.5, 0.65);
+            const fbGain = track(ctx.createGain());
+            fbGain.gain.value = 1;
+            fbConst.connect(fbGain);
+            fbConst.start(now);
+            stopCallbacks.push(() => fbConst.stop());
+            cvOutputs.set(`${node.id}:cv`, fbGain);
+            cvTargets.set(`${node.id}:in`, { param: sampleInConst.offset, baseScale: 1.0 });
+            nodeControllers.set(node.id, {
+              type: 'sampleHold',
+              updateParams: () => undefined,
+            });
+          }
+          break;
+        }
+
+        case 'slopeEnv': {
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-slope-processor', {
+                  numberOfInputs: 0,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              const modeParam = worklet.parameters.get('mode')!;
+              const riseParam = worklet.parameters.get('rise')!;
+              const fallParam = worklet.parameters.get('fall')!;
+              const shapeParam = worklet.parameters.get('shape')!;
+              const depthParam = worklet.parameters.get('depth')!;
+              const bipolarParam = worklet.parameters.get('bipolar')!;
+              const gateParam = worklet.parameters.get('gate')!;
+              gateParam.setValueAtTime(1, now);
+
+              const applySlope = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                modeParam.setValueAtTime(
+                  SLOPE_MODE_INDEX[String(merged.mode ?? 'oneShot')] ?? 0,
+                  t
+                );
+                setAudioParam(
+                  riseParam,
+                  clampFinite(merged.rise, 0.002, 10, 0.04),
+                  t,
+                  0.01,
+                  immediate
+                );
+                setAudioParam(
+                  fallParam,
+                  clampFinite(merged.fall, 0.004, 12, 0.45),
+                  t,
+                  0.01,
+                  immediate
+                );
+                setAudioParam(
+                  shapeParam,
+                  clampFinite(merged.shape, -1, 1, 0.35),
+                  t,
+                  0.01,
+                  immediate
+                );
+                setAudioParam(
+                  depthParam,
+                  clampFinite(merged.depth, 0, 1.5, 0.85),
+                  t,
+                  0.01,
+                  immediate
+                );
+                bipolarParam.setValueAtTime(merged.bipolar ? 1 : 0, t);
+              };
+
+              applySlope(node.params, now, true);
+
+              releaseCallbacks.push((t) => {
+                const live = this.getLiveNodeParams(node.id, node.params);
+                gateParam.setValueAtTime(0, Math.max(now, t));
+                return clampFinite(live.fall, 0.01, 4.0, 0.25);
+              });
+
+              cvOutputs.set(`${node.id}:cv`, worklet);
+              cvTargets.set(`${node.id}:riseCv`, { param: riseParam, baseScale: 0.8 });
+              cvTargets.set(`${node.id}:fallCv`, { param: fallParam, baseScale: 1.5 });
+              modParamTargets.set(`${node.id}:rise`, { param: riseParam, baseScale: 0.8 });
+              modParamTargets.set(`${node.id}:fall`, { param: fallParam, baseScale: 1.5 });
+              modParamTargets.set(`${node.id}:depth`, { param: depthParam, baseScale: 0.65 });
+
+              nodeControllers.set(node.id, {
+                type: 'slopeEnv',
+                updateParams: applySlope,
+              });
+              usedWorklet = true;
+            } catch {
+              usedWorklet = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const fbConst = track(ctx.createConstantSource());
+            fbConst.offset.value = 1;
+            const fbGain = track(ctx.createGain());
+            const rise = clampFinite(node.params.rise, 0.002, 6, 0.04);
+            const fall = clampFinite(node.params.fall, 0.005, 8, 0.45);
+            const depth = clampFinite(node.params.depth, 0, 1.5, 0.85);
+            fbGain.gain.setValueAtTime(0.0001, now);
+            fbGain.gain.linearRampToValueAtTime(depth, now + rise);
+            fbGain.gain.linearRampToValueAtTime(0.0001, now + rise + fall);
+            fbConst.connect(fbGain);
+            fbConst.start(now);
+            stopCallbacks.push(() => fbConst.stop());
+            cvOutputs.set(`${node.id}:cv`, fbGain);
+            nodeControllers.set(node.id, {
+              type: 'slopeEnv',
+              updateParams: () => undefined,
+            });
+          }
+          break;
+        }
+
+        case 'stepSequencer': {
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-stepseq-processor', {
+                  numberOfInputs: 0,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              const rateParam = worklet.parameters.get('rate')!;
+              const stepsParam = worklet.parameters.get('steps')!;
+              const dirParam = worklet.parameters.get('direction')!;
+              const glideParam = worklet.parameters.get('glide')!;
+              const depthParam = worklet.parameters.get('depth')!;
+              worklet.parameters.get('seed')!.setValueAtTime(300 + ((this.voiceCounter * 3571) % 80000), now);
+
+              const applySeq = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(rateParam, clampFinite(merged.rate, 0.2, 30, 4.0), t, 0.01, immediate);
+                stepsParam.setValueAtTime(
+                  Math.max(2, Math.min(8, Math.round(finiteNum(merged.steps, 8)))),
+                  t
+                );
+                dirParam.setValueAtTime(
+                  SEQ_DIR_INDEX[String(merged.direction ?? 'forward')] ?? 0,
+                  t
+                );
+                setAudioParam(glideParam, clampFinite(merged.glide, 0, 1, 0.08), t, 0.01, immediate);
+                setAudioParam(depthParam, clampFinite(merged.depth, 0, 1.5, 0.7), t, 0.01, immediate);
+                for (let s = 1; s <= 8; s++) {
+                  const sp = worklet.parameters.get(`step${s}`);
+                  if (sp) {
+                    setAudioParam(sp, clampFinite(merged[`step${s}`], -1, 1, 0), t, 0.008, immediate);
+                  }
+                }
+              };
+
+              applySeq(node.params, now, true);
+
+              cvOutputs.set(`${node.id}:cv`, worklet);
+              cvTargets.set(`${node.id}:rate`, { param: rateParam, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:rate`, { param: rateParam, baseScale: 8.0 });
+              modParamTargets.set(`${node.id}:glide`, { param: glideParam, baseScale: 0.5 });
+              modParamTargets.set(`${node.id}:depth`, { param: depthParam, baseScale: 0.65 });
+
+              nodeControllers.set(node.id, {
+                type: 'stepSequencer',
+                updateParams: applySeq,
+              });
+              usedWorklet = true;
+            } catch {
+              usedWorklet = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const fbConst = track(ctx.createConstantSource());
+            fbConst.offset.value = clampFinite(node.params.step1, -1, 1, 0.8) * clampFinite(node.params.depth, 0, 1.5, 0.7);
+            const fbGain = track(ctx.createGain());
+            fbConst.connect(fbGain);
+            fbConst.start(now);
+            stopCallbacks.push(() => fbConst.stop());
+            cvOutputs.set(`${node.id}:cv`, fbGain);
+            nodeControllers.set(node.id, {
+              type: 'stepSequencer',
+              updateParams: () => undefined,
+            });
+          }
+          break;
+        }
+
+        case 'envFollower': {
+          const senseIn = track(ctx.createGain());
+          let usedWorklet = false;
+          if (this.workletReady) {
+            try {
+              const worklet = track(
+                new AudioWorkletNode(ctx, 'timbre-envfollower-processor', {
+                  numberOfInputs: 1,
+                  numberOfOutputs: 1,
+                  outputChannelCount: [1],
+                })
+              );
+              worklet.onprocessorerror = () => {
+                this.workletReady = false;
+              };
+              senseIn.connect(worklet);
+              stopCallbacks.push(() => {
+                try {
+                  worklet.port.postMessage('stop');
+                } catch {
+                  // ignore
+                }
+              });
+
+              const atkParam = worklet.parameters.get('attackMs')!;
+              const relParam = worklet.parameters.get('releaseMs')!;
+              const sensParam = worklet.parameters.get('sensitivity')!;
+              const invParam = worklet.parameters.get('invert')!;
+              const depthParam = worklet.parameters.get('depth')!;
+
+              const applyEf = (
+                p: Record<string, number | string | boolean>,
+                t: number,
+                immediate = false
+              ) => {
+                const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
+                setAudioParam(atkParam, clampFinite(merged.attackMs, 1, 250, 8), t, 0.01, immediate);
+                setAudioParam(relParam, clampFinite(merged.releaseMs, 10, 1500, 140), t, 0.01, immediate);
+                setAudioParam(
+                  sensParam,
+                  clampFinite(merged.sensitivity, 0.2, 4.0, 1.5),
+                  t,
+                  0.01,
+                  immediate
+                );
+                invParam.setValueAtTime(merged.invert ? 1 : 0, t);
+                setAudioParam(depthParam, clampFinite(merged.depth, 0, 1.5, 1.0), t, 0.01, immediate);
+              };
+
+              applyEf(node.params, now, true);
+
+              audioInputs.set(`${node.id}:in`, senseIn);
+              cvOutputs.set(`${node.id}:cv`, worklet);
+              modParamTargets.set(`${node.id}:sensitivity`, { param: sensParam, baseScale: 1.5 });
+              modParamTargets.set(`${node.id}:depth`, { param: depthParam, baseScale: 0.65 });
+
+              nodeControllers.set(node.id, {
+                type: 'envFollower',
+                updateParams: applyEf,
+              });
+              usedWorklet = true;
+            } catch {
+              usedWorklet = false;
+            }
+          }
+
+          if (!usedWorklet) {
+            const fbConst = track(ctx.createConstantSource());
+            fbConst.offset.value = 0;
+            const fbGain = track(ctx.createGain());
+            fbConst.connect(fbGain);
+            fbConst.start(now);
+            stopCallbacks.push(() => fbConst.stop());
+            audioInputs.set(`${node.id}:in`, senseIn);
+            cvOutputs.set(`${node.id}:cv`, fbGain);
+            nodeControllers.set(node.id, {
+              type: 'envFollower',
+              updateParams: () => undefined,
+            });
+          }
           break;
         }
       }

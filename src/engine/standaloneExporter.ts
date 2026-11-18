@@ -1,6 +1,7 @@
 import { ALTERNATIVE_CARRIER_WORKLET_CODE } from './carrierWaves';
 import { SOURCE_WORKLET_CODE } from './sourceWorklets';
 import { PROCESSOR_WORKLET_CODE } from './processorWorklets';
+import { MODULATOR_WORKLET_CODE } from './modulatorWorklets';
 
 export function generateStandaloneEngineSource(): string {
   return `/**
@@ -386,6 +387,7 @@ registerProcessor('timbre-shimmer-processor', ShimmerTankProcessor);
 ${ALTERNATIVE_CARRIER_WORKLET_CODE}
 ${SOURCE_WORKLET_CODE}
 ${PROCESSOR_WORKLET_CODE}
+${MODULATOR_WORKLET_CODE}
 \`;
 
 const VALID_OSC_TYPES = new Set(['sine', 'square', 'sawtooth', 'triangle']);
@@ -395,6 +397,9 @@ const MODAL_MAT_MAP = { marimba: 0, bell: 1, kalimba: 2, steelDrum: 3, plate: 4,
 const PIPE_BORE_MAP = { flute: 0, clarinet: 1, reed: 2, organPipe: 3 };
 const CROSSFADE_MAP = { equalPower: 0, linear: 1, blendSum: 2 };
 const RINGMOD_MAP = { ring: 0, am: 1, rectified: 2 };
+const SH_MODE_MAP = { random: 0, quantized: 1, external: 2 };
+const SLOPE_MODE_MAP = { oneShot: 0, asr: 1, loop: 2 };
+const SEQ_DIR_MAP = { forward: 0, pendulum: 1, random: 2 };
 const VALID_FILTER_TYPES = new Set(['lowpass', 'highpass', 'bandpass', 'lowshelf', 'highshelf', 'peaking', 'notch', 'allpass']);
 
 function parseHarmonicsArr(raw) {
@@ -1454,6 +1459,88 @@ export class TimbreLabSynth {
         cvOut.set(node.id + ':cv', g);
         modTargets.set(node.id + ':rate', { param: osc.frequency, scale: 6 });
         modTargets.set(node.id + ':depth', { param: g.gain, scale: 0.6 });
+      } else if (node.type === 'sampleHold') {
+        const sIn = track(ctx.createConstantSource()); sIn.offset.value = 0; sIn.start(now); stops.push(() => sIn.stop());
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-samplehold-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }));
+            sIn.connect(w); stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const rp = w.parameters.get('rate'), sp = w.parameters.get('slew'), dp = w.parameters.get('depth');
+            w.parameters.get('mode').value = SH_MODE_MAP[String(p.sourceMode || 'random')] ?? 0;
+            rp.value = clampFinite(p.rate, 0.2, 30, 4.5); sp.value = clampFinite(p.slew, 0, 1, 0.15); dp.value = clampFinite(p.depth, 0, 1.5, 0.65);
+            w.parameters.get('unipolar').value = p.unipolar ? 1 : 0; w.parameters.get('seed').value = 1000 + ((this.voiceCounter * 7919) % 90000);
+            cvOut.set(node.id + ':cv', w); cvTarget.set(node.id + ':in', { param: sIn.offset, scale: 1.0 }); cvTarget.set(node.id + ':rate', { param: rp, scale: 10.0 });
+            modTargets.set(node.id + ':rate', { param: rp, scale: 10.0 }); modTargets.set(node.id + ':slew', { param: sp, scale: 0.5 }); modTargets.set(node.id + ':depth', { param: dp, scale: 0.65 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const fc = track(ctx.createConstantSource()), fg = track(ctx.createGain()); fc.offset.value = (Math.random() * 2 - 1) * clampFinite(p.depth, 0, 1.5, 0.65);
+          fc.connect(fg); fc.start(now); stops.push(() => fc.stop()); cvOut.set(node.id + ':cv', fg); cvTarget.set(node.id + ':in', { param: sIn.offset, scale: 1.0 });
+        }
+      } else if (node.type === 'slopeEnv') {
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-slope-processor', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] }));
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const rp = w.parameters.get('rise'), fp = w.parameters.get('fall'), dp = w.parameters.get('depth'), gp = w.parameters.get('gate');
+            w.parameters.get('mode').value = SLOPE_MODE_MAP[String(p.mode || 'oneShot')] ?? 0;
+            rp.value = clampFinite(p.rise, 0.002, 10, 0.04); fp.value = clampFinite(p.fall, 0.004, 12, 0.45);
+            w.parameters.get('shape').value = clampFinite(p.shape, -1, 1, 0.35); dp.value = clampFinite(p.depth, 0, 1.5, 0.85);
+            w.parameters.get('bipolar').value = p.bipolar ? 1 : 0; gp.value = 1;
+            releases.push((t) => { gp.setValueAtTime(0, Math.max(now, t)); return clampFinite(p.fall, 0.01, 4.0, 0.25); });
+            cvOut.set(node.id + ':cv', w); cvTarget.set(node.id + ':riseCv', { param: rp, scale: 0.8 }); cvTarget.set(node.id + ':fallCv', { param: fp, scale: 1.5 });
+            modTargets.set(node.id + ':rise', { param: rp, scale: 0.8 }); modTargets.set(node.id + ':fall', { param: fp, scale: 1.5 }); modTargets.set(node.id + ':depth', { param: dp, scale: 0.65 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const fc = track(ctx.createConstantSource()), fg = track(ctx.createGain()); fc.offset.value = 1;
+          const rs = clampFinite(p.rise, 0.002, 6, 0.04), fl = clampFinite(p.fall, 0.005, 8, 0.45), dp = clampFinite(p.depth, 0, 1.5, 0.85);
+          fg.gain.setValueAtTime(0.0001, now); fg.gain.linearRampToValueAtTime(dp, now + rs); fg.gain.linearRampToValueAtTime(0.0001, now + rs + fl);
+          fc.connect(fg); fc.start(now); stops.push(() => fc.stop()); cvOut.set(node.id + ':cv', fg);
+        }
+      } else if (node.type === 'stepSequencer') {
+        let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-stepseq-processor', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] }));
+            stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const rp = w.parameters.get('rate'), gp = w.parameters.get('glide'), dp = w.parameters.get('depth');
+            rp.value = clampFinite(p.rate, 0.2, 30, 4.0); w.parameters.get('steps').value = Math.max(2, Math.min(8, Math.round(Number(p.steps) || 8)));
+            w.parameters.get('direction').value = SEQ_DIR_MAP[String(p.direction || 'forward')] ?? 0;
+            gp.value = clampFinite(p.glide, 0, 1, 0.08); dp.value = clampFinite(p.depth, 0, 1.5, 0.7);
+            w.parameters.get('seed').value = 300 + ((this.voiceCounter * 3571) % 80000);
+            for (let s = 1; s <= 8; s++) w.parameters.get('step' + s).value = clampFinite(p['step' + s], -1, 1, 0);
+            cvOut.set(node.id + ':cv', w); cvTarget.set(node.id + ':rate', { param: rp, scale: 8.0 });
+            modTargets.set(node.id + ':rate', { param: rp, scale: 8.0 }); modTargets.set(node.id + ':glide', { param: gp, scale: 0.5 }); modTargets.set(node.id + ':depth', { param: dp, scale: 0.65 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const fc = track(ctx.createConstantSource()), fg = track(ctx.createGain()); fc.offset.value = clampFinite(p.step1, -1, 1, 0.8) * clampFinite(p.depth, 0, 1.5, 0.7);
+          fc.connect(fg); fc.start(now); stops.push(() => fc.stop()); cvOut.set(node.id + ':cv', fg);
+        }
+      } else if (node.type === 'envFollower') {
+        const sIn = track(ctx.createGain()); let ok = false;
+        if (this.workletReady) {
+          try {
+            const w = track(new AudioWorkletNode(ctx, 'timbre-envfollower-processor', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }));
+            sIn.connect(w); stops.push(() => { try { w.port.postMessage('stop'); } catch {} });
+            const sp = w.parameters.get('sensitivity'), dp = w.parameters.get('depth');
+            w.parameters.get('attackMs').value = clampFinite(p.attackMs, 1, 250, 8); w.parameters.get('releaseMs').value = clampFinite(p.releaseMs, 10, 1500, 140);
+            sp.value = clampFinite(p.sensitivity, 0.2, 4.0, 1.5); w.parameters.get('invert').value = p.invert ? 1 : 0; dp.value = clampFinite(p.depth, 0, 1.5, 1.0);
+            audioIn.set(node.id + ':in', sIn); cvOut.set(node.id + ':cv', w);
+            modTargets.set(node.id + ':sensitivity', { param: sp, scale: 1.5 }); modTargets.set(node.id + ':depth', { param: dp, scale: 0.65 });
+            ok = true;
+          } catch {}
+        }
+        if (!ok) {
+          const fc = track(ctx.createConstantSource()), fg = track(ctx.createGain()); fc.offset.value = 0; fc.connect(fg); fc.start(now); stops.push(() => fc.stop());
+          audioIn.set(node.id + ':in', sIn); cvOut.set(node.id + ':cv', fg);
+        }
       }
     }
 

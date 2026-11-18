@@ -148,6 +148,25 @@ const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
     { key: 'rate', label: 'LFO Rate' },
     { key: 'depth', label: 'LFO Depth' },
   ],
+  sampleHold: [
+    { key: 'rate', label: 'Clock Rate' },
+    { key: 'slew', label: 'Slew / Glide' },
+    { key: 'depth', label: 'Output Depth' },
+  ],
+  slopeEnv: [
+    { key: 'rise', label: 'Rise Time' },
+    { key: 'fall', label: 'Fall Time' },
+    { key: 'depth', label: 'Output Depth' },
+  ],
+  stepSequencer: [
+    { key: 'rate', label: 'Step Rate' },
+    { key: 'glide', label: 'Step Glide' },
+    { key: 'depth', label: 'Output Depth' },
+  ],
+  envFollower: [
+    { key: 'sensitivity', label: 'Input Sensitivity' },
+    { key: 'depth', label: 'Output Depth' },
+  ],
   delay: [
     { key: 'feedback', label: 'Echo Feedback' },
     { key: 'tone', label: 'Echo High Cut' },
@@ -179,10 +198,10 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
       { value: 'noise', label: 'Organic Friction Noise' },
     ];
     const nodeMods = patch.nodes
-      .filter((n) => n.type === 'lfo' || n.type === 'envelope')
+      .filter((n) => MODULE_REGISTRY[n.type]?.category === 'modulator')
       .map((n) => ({
         value: n.id,
-        label: `${n.label || MODULE_REGISTRY[n.type].label} (${n.type.toUpperCase()})`,
+        label: `${n.label || MODULE_REGISTRY[n.type].label} (MOD)`,
       }));
     return [...base, ...nodeMods];
   }, [patch.nodes, patch.macroLabels]);

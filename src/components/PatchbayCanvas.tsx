@@ -106,6 +106,14 @@ function getNodeSummary(node: SynthNode): string {
       return `A ${Number(p.attack ?? 0.015).toFixed(2)}s · R ${Number(p.release ?? 0.45).toFixed(2)}s`;
     case 'lfo':
       return `${String(p.waveform ?? 'sine')} · ${Number(p.rate ?? 5.2).toFixed(2)} Hz`;
+    case 'sampleHold':
+      return `${String(p.sourceMode ?? 'random')} · ${Number(p.rate ?? 4.5).toFixed(1)} Hz · slew ${Math.round(Number(p.slew ?? 0.15) * 100)}%`;
+    case 'slopeEnv':
+      return `${String(p.mode ?? 'oneShot')} · R ${Number(p.rise ?? 0.04).toFixed(2)}s / F ${Number(p.fall ?? 0.45).toFixed(2)}s`;
+    case 'stepSequencer':
+      return `${Number(p.steps ?? 8)} steps · ${Number(p.rate ?? 4.0).toFixed(1)} Hz · ${String(p.direction ?? 'forward')}`;
+    case 'envFollower':
+      return `A ${Math.round(Number(p.attackMs ?? 8))}ms · R ${Math.round(Number(p.releaseMs ?? 140))}ms${p.invert ? ' · INV' : ''}`;
     case 'delay':
       return `${Math.round(Number(p.time ?? 0.26) * 1000)} ms · fb ${Math.round(Number(p.feedback ?? 0.32) * 100)}%`;
     case 'reverb': {
@@ -348,6 +356,10 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     'granularCloud',
     'envelope',
     'lfo',
+    'sampleHold',
+    'slopeEnv',
+    'stepSequencer',
+    'envFollower',
     'delay',
     'reverb',
   ];

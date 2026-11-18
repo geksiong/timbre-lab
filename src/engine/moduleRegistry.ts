@@ -1006,6 +1006,129 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
       { key: 'delay', label: 'Onset Delay', type: 'range', min: 0, max: 6.0, step: 0.02, unit: 's', defaultValue: 0.18, tooltip: 'Waits briefly after a note begins before fading in vibrato or ambient drift.' },
     ],
   },
+  sampleHold: {
+    type: 'sampleHold',
+    label: 'Sample & Hold + Slew',
+    category: 'modulator',
+    description: 'Stepped random, quantized-step, or external-CV sampler with variable clock rate and portamento slew limiter.',
+    acousticGuide:
+      'Captures snapshots of random noise or another modulation signal on each clock pulse, outputting classic sci-fi stair-steps or smoothed organic drift when Slew is raised.',
+    bowedTip:
+      'Set Slew to 0.35–0.65 at a slow rate (1.2 Hz) and wire to Bow Pressure or Filter Cutoff for subtle human phrasing variations.',
+    ports: [
+      { id: 'in', label: 'Sample CV In', direction: 'in', signal: 'cv' },
+      { id: 'rate', label: 'Clock Rate CV', direction: 'in', signal: 'cv' },
+      { id: 'cv', label: 'Stepped CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      {
+        key: 'sourceMode',
+        label: 'Sample Source',
+        type: 'select',
+        options: [
+          { value: 'random', label: 'Random Noise (Smooth Range)' },
+          { value: 'quantized', label: 'Stepped Intervals (Discrete)' },
+          { value: 'external', label: 'External Sample CV In' },
+        ],
+        defaultValue: 'random',
+      },
+      { key: 'rate', label: 'Clock Rate', type: 'range', min: 0.2, max: 30, step: 0.05, unit: 'Hz', scale: 'log', defaultValue: 4.5 },
+      { key: 'slew', label: 'Slew / Glide', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.15, tooltip: '0 = crisp staircase steps; higher values glide smoothly between captured levels.' },
+      { key: 'depth', label: 'Output Depth', type: 'range', min: 0, max: 1.5, step: 0.01, unit: '', defaultValue: 0.65 },
+      { key: 'unipolar', label: 'Unipolar (0 to +1)', type: 'toggle', defaultValue: false, tooltip: 'Shifts output from bipolar (-1..+1) to positive-only (0..+1).' },
+    ],
+  },
+  slopeEnv: {
+    type: 'slopeEnv',
+    label: 'Function / Slope Gen',
+    category: 'modulator',
+    description: 'West-Coast Rise/Fall slope generator supporting one-shot AD transients, held ASR swells, and looping asymmetric LFO cycles.',
+    acousticGuide:
+      'Generates shapeable Rise and Fall ramps with logarithmic-to-exponential curvature. Can fire once per note like a snappy punch envelope or loop endlessly like an asymmetrical LFO.',
+    bowedTip:
+      'Try One-Shot AD with snappy Rise (0.015s) and Fall (0.25s) into Wavefolder Fold CV or FM Index CV for expressive brass/mallet attack transients.',
+    ports: [
+      { id: 'riseCv', label: 'Rise Time CV', direction: 'in', signal: 'cv' },
+      { id: 'fallCv', label: 'Fall Time CV', direction: 'in', signal: 'cv' },
+      { id: 'cv', label: 'Slope CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      {
+        key: 'mode',
+        label: 'Cycle Mode',
+        type: 'select',
+        options: [
+          { value: 'oneShot', label: 'One-Shot AD (Transient)' },
+          { value: 'asr', label: 'Hold ASR (Sustain Gate)' },
+          { value: 'loop', label: 'Looping Cycle (LFO)' },
+        ],
+        defaultValue: 'oneShot',
+      },
+      { key: 'rise', label: 'Rise Time', type: 'range', min: 0.002, max: 6.0, step: 0.005, unit: 's', scale: 'log', defaultValue: 0.04 },
+      { key: 'fall', label: 'Fall Time', type: 'range', min: 0.005, max: 8.0, step: 0.005, unit: 's', scale: 'log', defaultValue: 0.45 },
+      { key: 'shape', label: 'Curve Shape', type: 'range', min: -1, max: 1, step: 0.02, unit: '', defaultValue: 0.35, tooltip: 'Negative = logarithmic punch; 0 = linear; positive = exponential swoop.' },
+      { key: 'depth', label: 'Output Depth', type: 'range', min: 0, max: 1.5, step: 0.01, unit: '', defaultValue: 0.85 },
+      { key: 'bipolar', label: 'Bipolar (-1 to +1)', type: 'toggle', defaultValue: false },
+    ],
+  },
+  stepSequencer: {
+    type: 'stepSequencer',
+    label: 'Mod Step Sequencer',
+    category: 'modulator',
+    description: '8-step programmable CV pattern sequencer with forward/pendulum/random playback, step count, and per-step smoothing.',
+    acousticGuide:
+      'Steps cyclically through 2 to 8 dialed CV levels on every note, ideal for rhythmic filter pulses, evolving harmonic arpeggio timbres, or stepped pitch sequences.',
+    ports: [
+      { id: 'rate', label: 'Step Rate CV', direction: 'in', signal: 'cv' },
+      { id: 'cv', label: 'Step CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      { key: 'rate', label: 'Step Rate', type: 'range', min: 0.2, max: 24, step: 0.05, unit: 'Hz', scale: 'log', defaultValue: 4.0 },
+      { key: 'steps', label: 'Active Steps', type: 'range', min: 2, max: 8, step: 1, unit: '', defaultValue: 8 },
+      {
+        key: 'direction',
+        label: 'Direction',
+        type: 'select',
+        options: [
+          { value: 'forward', label: 'Forward (1 → N)' },
+          { value: 'pendulum', label: 'Pendulum (Ping-Pong)' },
+          { value: 'random', label: 'Random Step' },
+        ],
+        defaultValue: 'forward',
+      },
+      { key: 'glide', label: 'Step Glide', type: 'range', min: 0, max: 1, step: 0.01, unit: '', defaultValue: 0.08 },
+      { key: 'depth', label: 'Output Depth', type: 'range', min: 0, max: 1.5, step: 0.01, unit: '', defaultValue: 0.7 },
+      { key: 'step1', label: 'Step 1', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 0.8 },
+      { key: 'step2', label: 'Step 2', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 0.2 },
+      { key: 'step3', label: 'Step 3', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 0.6, visibleWhen: (p) => Number(p.steps ?? 8) >= 3 },
+      { key: 'step4', label: 'Step 4', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: -0.2, visibleWhen: (p) => Number(p.steps ?? 8) >= 4 },
+      { key: 'step5', label: 'Step 5', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 1.0, visibleWhen: (p) => Number(p.steps ?? 8) >= 5 },
+      { key: 'step6', label: 'Step 6', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 0.4, visibleWhen: (p) => Number(p.steps ?? 8) >= 6 },
+      { key: 'step7', label: 'Step 7', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: 0.0, visibleWhen: (p) => Number(p.steps ?? 8) >= 7 },
+      { key: 'step8', label: 'Step 8', type: 'range', min: -1, max: 1, step: 0.05, unit: '', defaultValue: -0.5, visibleWhen: (p) => Number(p.steps ?? 8) >= 8 },
+    ],
+  },
+  envFollower: {
+    type: 'envFollower',
+    label: 'Envelope Follower',
+    category: 'modulator',
+    description: 'Audio-to-CV dynamics extractor that turns incoming audio loudness into a smooth modulation envelope.',
+    acousticGuide:
+      'Listens to any audio signal—like Breath/Noise bursts, Physical String attacks, or Oscillators—and traces its volume contour into CV to drive filters, wavefolders, or ducking.',
+    bowedTip:
+      'Patch Breath/Noise into Envelope Follower and route CV Out to Filter Cutoff CV for dynamic breath-coupled brightness.',
+    ports: [
+      { id: 'in', label: 'Audio Sense In', direction: 'in', signal: 'audio' },
+      { id: 'cv', label: 'Follower CV Out', direction: 'out', signal: 'cv' },
+    ],
+    params: [
+      { key: 'attackMs', label: 'Attack Sense', type: 'range', min: 1, max: 250, step: 1, unit: 'ms', scale: 'log', defaultValue: 8 },
+      { key: 'releaseMs', label: 'Release Tail', type: 'range', min: 10, max: 1500, step: 5, unit: 'ms', scale: 'log', defaultValue: 140 },
+      { key: 'sensitivity', label: 'Input Sensitivity', type: 'range', min: 0.2, max: 4.0, step: 0.05, unit: 'x', defaultValue: 1.5 },
+      { key: 'depth', label: 'Output Depth', type: 'range', min: 0, max: 1.5, step: 0.01, unit: '', defaultValue: 1.0 },
+      { key: 'invert', label: 'Invert (Sidechain Duck)', type: 'toggle', defaultValue: false, tooltip: 'Inverts output (1 - level) so loud audio ducks target parameters.' },
+    ],
+  },
   delay: {
     type: 'delay',
     label: 'Stereo Delay',

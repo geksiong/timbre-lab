@@ -19,6 +19,10 @@ export type ModuleType =
   | 'granularCloud'
   | 'envelope'
   | 'lfo'
+  | 'sampleHold'
+  | 'slopeEnv'
+  | 'stepSequencer'
+  | 'envFollower'
   | 'delay'
   | 'reverb'
   | 'output';
