@@ -45,6 +45,7 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return [
       { name: 'frequency', defaultValue: 220, minValue: 20, maxValue: 6000, automationRate: 'a-rate' },
+      { name: 'detune', defaultValue: 0, minValue: -2400, maxValue: 2400, automationRate: 'a-rate' },
       { name: 'damping', defaultValue: 0.45, minValue: 0.02, maxValue: 0.99, automationRate: 'k-rate' },
       { name: 'decay', defaultValue: 0.985, minValue: 0.5, maxValue: 0.996, automationRate: 'k-rate' },
       { name: 'brightness', defaultValue: 0.72, minValue: 0.05, maxValue: 1.0, automationRate: 'k-rate' },
@@ -103,6 +104,7 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
     const extInput = inputs[0] && inputs[0][0] ? inputs[0][0] : null;
 
     const freqArr = parameters.frequency;
+    const detArr = parameters.detune;
     const damping = this.safeClamp(parameters.damping[0], 0.02, 0.99, 0.45);
     const decay = this.safeClamp(parameters.decay[0], 0.5, 0.995, 0.985);
     const brightness = this.safeClamp(parameters.brightness[0], 0.05, 1.0, 0.72);
@@ -126,7 +128,8 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
 
     if (gate > 0.5 && !this.lastTriggered) {
       this.lastTriggered = true;
-      const f = this.safeClamp(freqArr[0], 20, 6000, 220);
+      const d0 = this.safeClamp(detArr[0], -2400, 2400, 0);
+      const f = this.safeClamp(freqArr[0] * (Math.abs(d0) > 0.01 ? Math.pow(2, d0 / 1200) : 1), 20, 6500, 220);
       const period = Math.max(4, Math.min(this.maxDelay - 2, Math.round(sampleRate / f)));
       this.exciterTotal = mode === 2 ? Math.max(12, Math.round(period * 0.85)) : period;
       this.exciterSamplesLeft = this.exciterTotal;
@@ -138,13 +141,21 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
       this.lastTriggered = false;
     }
 
-    const baseLpCoeff = mode === 2 ? Math.max(0.24, 0.78 - damping * 0.42) : 1 - damping * 0.58;
+    const baseLpCoeff = mode === 2
+      ? Math.max(0.24, 0.78 - damping * 0.42)
+      : mode === 1
+        ? Math.max(0.32, Math.min(0.92, (1 - damping * 0.48) * (0.64 + brightness * 0.40)))
+        : 1 - damping * 0.58;
 
     for (let i = 0; i < channel.length; i++) {
-      const freq = this.safeClamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 20, 6000, 220);
+      const baseF = this.safeClamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 20, 6000, 220);
+      const det = this.safeClamp(detArr.length > 1 ? detArr[i] : detArr[0], -2400, 2400, 0);
+      const freq = this.safeClamp(Math.abs(det) > 0.01 ? baseF * Math.pow(2, det / 1200) : baseF, 20, 6500, 220);
       const bowPressure = this.safeClamp(bowPressureArr.length > 1 ? bowPressureArr[i] : bowPressureArr[0], 0.05, 1.0, 0.56);
-      const lpBlend = mode === 1 ? 0 : Math.max(0, Math.min(0.88, (freq - 180) / 1100));
-      const lpCoeff = baseLpCoeff + (0.992 - baseLpCoeff) * lpBlend;
+      const lpBlend = mode === 1
+        ? Math.max(0, Math.min(0.78, (freq - 200) / 1300))
+        : Math.max(0, Math.min(0.88, (freq - 180) / 1100));
+      const lpCoeff = baseLpCoeff + ((mode === 1 ? 0.988 : 0.992) - baseLpCoeff) * lpBlend;
       const oneMinusLp = 1 - lpCoeff;
 
       const w = (6.28318530718 * freq) / sampleRate;
@@ -180,25 +191,38 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
 
       if (mode === 1) {
         const targetEnv = gate > 0.5 ? 1.0 : 0.0;
-        const envRate = gate > 0.5 ? 0.0012 : 0.0035;
+        const envRate = gate > 0.5 ? 0.0014 : 0.0035;
         this.bowEnv += (targetEnv - this.bowEnv) * envRate;
 
         if (this.bowEnv > 0.002) {
           this.bowPhase += freq / sampleRate;
           if (this.bowPhase >= 1 || !Number.isFinite(this.bowPhase)) this.bowPhase = this.bowPhase >= 1 ? this.bowPhase - Math.floor(this.bowPhase) : 0;
 
-          const stringVel = delayedSample - this.lastOut * 0.52;
-          const bowVel = (0.18 + velocity * 0.45) * (0.6 + brightness * 0.4);
+          const stringVel = delayedSample - this.lastOut * 0.48;
+          const bowVel = (0.20 + velocity * 0.36) * (0.68 + brightness * 0.32);
           const relVel = bowVel - stringVel;
-          const gripSlope = 4.2 - bowPressure * 2.5;
-          const friction = 1.0 / (1.0 + Math.pow(Math.abs(relVel) * gripSlope, 2));
+          const gripSlope = 2.6 + bowPressure * 3.2;
+          const friction = 0.25 + 0.75 / (1.0 + Math.pow(Math.abs(relVel) * gripSlope, 2));
+          const frictionForce = Math.tanh(relVel * (1.3 + bowPressure * 1.5)) * friction;
 
-          const sawDrive = (this.bowPhase * 2 - 1) * (0.025 + bowPressure * 0.032);
+          const ph = this.bowPhase * 6.28318530718;
+          const br = 0.35 + brightness * 0.65;
+          const helmholtzDrive = (
+            Math.sin(ph) * 0.52 +
+            Math.sin(ph * 2) * 0.48 +
+            Math.sin(ph * 3) * (0.32 * br + 0.08) +
+            Math.sin(ph * 4) * (0.22 * br) +
+            Math.sin(ph * 5) * (0.16 * br) +
+            Math.sin(ph * 6) * (0.11 * br) +
+            Math.sin(ph * 7) * (0.07 * br) +
+            Math.sin(ph * 8) * (0.045 * br)
+          ) * (0.025 + bowPressure * 0.028);
+
           const rawRosin = this.nextRand();
-          this.rosinLp += (0.25 + brightness * 0.55) * (rawRosin - this.rosinLp);
-          const rosinForce = this.rosinLp * rosin * (0.015 + bowPressure * 0.035);
+          this.rosinLp += (0.22 + brightness * 0.48) * (rawRosin - this.rosinLp);
+          const rosinForce = this.rosinLp * (0.008 + rosin * (0.018 + bowPressure * 0.028));
 
-          exciter += (relVel * friction * (0.14 + bowPressure * 0.22) + sawDrive + rosinForce) * this.bowEnv * velocity;
+          exciter += (frictionForce * (0.085 + bowPressure * 0.105) + helmholtzDrive + rosinForce) * this.bowEnv * velocity;
         }
       } else if (this.exciterSamplesLeft > 0) {
         const rawNoise = this.nextRand();
@@ -220,7 +244,7 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
 
       const baseDecay = gate > 0.5 ? decay : Math.min(decay, 0.968);
       const activeDecay = mode === 1
-        ? (gate > 0.5 ? 0.945 + (1 - damping) * 0.035 : decay * 0.94)
+        ? (gate > 0.5 ? 0.964 + (1 - damping) * 0.024 : decay * 0.94)
         : Math.pow(baseDecay, Math.min(1.5, 210 / Math.max(55, freq)));
 
       let nextVal = exciter + this.lastOut * activeDecay;
@@ -238,7 +262,7 @@ class KarplusStrongProcessor extends AudioWorkletProcessor {
         const bowTapOffset = Math.max(1, Math.min(intDelay - 1, Math.round(exactDelay * bowPosition)));
         const tapIdx = (this.writeIndex - bowTapOffset + this.maxDelay) % this.maxDelay;
         const tapVal = Number.isFinite(this.buffer[tapIdx]) ? this.buffer[tapIdx] : 0;
-        outSample = nextVal - tapVal * 0.42;
+        outSample = (nextVal - tapVal * 0.62) * 0.68;
       }
 
       this.writeIndex = (this.writeIndex + 1) % this.maxDelay;
@@ -672,6 +696,8 @@ export class SynthEngine {
   private noteEpoch = 0;
   private pendingMidiCancelledAt = new Map<number, number>();
   private lastAllNotesOffEpoch = 0;
+  private lastNoteMidi: number | null = null;
+  private lastNoteOnTimeSec = -999;
 
   private pitchBendSemitones = 0;
   private modWheel = 0;
@@ -861,6 +887,8 @@ export class SynthEngine {
     this.workletAttempted = false;
     this.workletLoading = null;
     this.lastFxSignature = '';
+    this.lastNoteMidi = null;
+    this.lastNoteOnTimeSec = -999;
     this.ctx = null;
     this.emitLatencyMetrics();
   }
@@ -987,6 +1015,10 @@ export class SynthEngine {
   }
 
   public loadPatch(patch: SynthPatch): void {
+    if (this.patch?.id !== patch.id) {
+      this.lastNoteMidi = null;
+      this.lastNoteOnTimeSec = -999;
+    }
     this.patch = patch;
     if (!this.ctx) return;
     const sig = this.computeFxSignature(patch);
@@ -1207,6 +1239,8 @@ export class SynthEngine {
     if (voice) {
       this.voices.set(voiceId, voice);
     }
+    this.lastNoteMidi = midi;
+    this.lastNoteOnTimeSec = now;
     this.scheduleUiUpdate();
   }
 
@@ -1237,6 +1271,8 @@ export class SynthEngine {
     for (const key of Array.from(this.voices.keys())) {
       this.forceStopVoice(key);
     }
+    this.lastNoteMidi = null;
+    this.lastNoteOnTimeSec = -999;
     this.emitActiveNotes();
   }
 
@@ -2151,6 +2187,24 @@ export class SynthEngine {
       return n;
     };
 
+    const glideSec = clampFinite(this.patch.glideMs, 0, 1200, 0) / 1000;
+    let glideConst: ConstantSourceNode | null = null;
+    if (
+      glideSec > 0.001 &&
+      this.lastNoteMidi !== null &&
+      this.lastNoteMidi !== midi &&
+      now - this.lastNoteOnTimeSec < 2.2
+    ) {
+      const startCents = clampFinite((this.lastNoteMidi - midi) * 100, -2400, 2400, 0);
+      if (Math.abs(startCents) > 0.5) {
+        glideConst = track(ctx.createConstantSource());
+        glideConst.offset.setValueAtTime(startCents, now);
+        glideConst.offset.linearRampToValueAtTime(0, now + glideSec);
+        glideConst.start(now);
+        stopCallbacks.push(() => glideConst?.stop());
+      }
+    }
+
     try {
     // Pass 1: Instantiate per-voice audio/modulator nodes
     for (const node of this.patch.nodes) {
@@ -2180,6 +2234,7 @@ export class SynthEngine {
           pitchConst.connect(pitchSum);
           pitchConst.start(now);
           stopCallbacks.push(() => pitchConst.stop());
+          if (glideConst) glideConst.connect(pitchSum);
           levelGain.connect(ampCvTarget);
 
           const initialWf = String(node.params.waveform ?? 'sawtooth');
@@ -2534,6 +2589,11 @@ export class SynthEngine {
               modGain.connect(cFreqParam);
               noiseFmGain.connect(cFreqParam);
               modAudioIn.connect(cFreqParam);
+              if (glideConst) {
+                glideConst.connect(cDetuneParam);
+                glideConst.connect(mod.detune);
+                glideConst.connect(modHarmonic.detune);
+              }
               carrierWorklet.connect(levelGain);
 
               let lastHarmonicsStr = '';
@@ -2654,6 +2714,11 @@ export class SynthEngine {
             modGain.connect(carrier.frequency);
             noiseFmGain.connect(carrier.frequency);
             modAudioIn.connect(carrier.frequency);
+            if (glideConst) {
+              glideConst.connect(carrier.detune);
+              glideConst.connect(mod.detune);
+              glideConst.connect(modHarmonic.detune);
+            }
             carrier.connect(levelGain);
 
             const applyFm = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
@@ -2745,6 +2810,7 @@ export class SynthEngine {
               worklet.connect(levelGain);
 
             const freqParam = worklet.parameters.get('frequency')!;
+            const detuneParam = worklet.parameters.get('detune')!;
             const dampParam = worklet.parameters.get('damping')!;
             const decayParam = worklet.parameters.get('decay')!;
             const brightParam = worklet.parameters.get('brightness')!;
@@ -2756,6 +2822,7 @@ export class SynthEngine {
             const modeParam = worklet.parameters.get('excitationMode')!;
             const gateParam = worklet.parameters.get('gate')!;
             const velParam = worklet.parameters.get('velocity')!;
+            if (glideConst) glideConst.connect(detuneParam);
 
             const applyString = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
               const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
@@ -2795,11 +2862,11 @@ export class SynthEngine {
 
             audioInputs.set(`${node.id}:exciter`, exciterIn);
             audioOutputs.set(`${node.id}:out`, ampCvTarget);
-            cvTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.08 });
+            cvTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
             cvTargets.set(`${node.id}:bow`, { param: bowPressParam, baseScale: 0.38 });
             cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
 
-            modParamTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.06 });
+            modParamTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
             modParamTargets.set(`${node.id}:bowPressure`, { param: bowPressParam, baseScale: 0.38 });
             modParamTargets.set(`${node.id}:damping`, { param: dampParam, baseScale: 0.35 });
             modParamTargets.set(`${node.id}:brightness`, { param: brightParam, baseScale: 0.4 });
@@ -2825,6 +2892,10 @@ export class SynthEngine {
             osc1.type = 'sawtooth';
             osc2.type = 'triangle';
             bodyFilter.type = 'lowpass';
+            if (glideConst) {
+              glideConst.connect(osc1.detune);
+              glideConst.connect(osc2.detune);
+            }
             osc1.connect(bodyFilter);
             osc2.connect(bodyFilter);
             exciterIn.connect(bodyFilter);
@@ -2887,6 +2958,7 @@ export class SynthEngine {
               worklet.connect(levelGain);
 
               const freqParam = worklet.parameters.get('frequency')!;
+              const detuneParam = worklet.parameters.get('detune')!;
               const matParam = worklet.parameters.get('material')!;
               const inharmParam = worklet.parameters.get('inharmonicity')!;
               const brightParam = worklet.parameters.get('brightness')!;
@@ -2896,6 +2968,7 @@ export class SynthEngine {
               const excMixParam = worklet.parameters.get('exciterMix')!;
               const gateParam = worklet.parameters.get('gate')!;
               const velParam = worklet.parameters.get('velocity')!;
+              if (glideConst) glideConst.connect(detuneParam);
 
               const applyModal = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
                 const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
@@ -2935,11 +3008,11 @@ export class SynthEngine {
 
               audioInputs.set(`${node.id}:exciter`, exciterIn);
               audioOutputs.set(`${node.id}:out`, ampCvTarget);
-              cvTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.08 });
+              cvTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
               cvTargets.set(`${node.id}:brightness`, { param: brightParam, baseScale: 0.45 });
               cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
 
-              modParamTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.06 });
+              modParamTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
               modParamTargets.set(`${node.id}:brightness`, { param: brightParam, baseScale: 0.45 });
               modParamTargets.set(`${node.id}:inharmonicity`, { param: inharmParam, baseScale: 0.45 });
               modParamTargets.set(`${node.id}:damping`, { param: dampParam, baseScale: 0.4 });
@@ -2966,6 +3039,11 @@ export class SynthEngine {
             o2.type = 'sine';
             o3.type = 'triangle';
             bp.type = 'lowpass';
+            if (glideConst) {
+              glideConst.connect(o1.detune);
+              glideConst.connect(o2.detune);
+              glideConst.connect(o3.detune);
+            }
             o1.connect(bp);
             o2.connect(bp);
             o3.connect(bp);
@@ -3032,6 +3110,7 @@ export class SynthEngine {
               worklet.connect(levelGain);
 
               const freqParam = worklet.parameters.get('frequency')!;
+              const detuneParam = worklet.parameters.get('detune')!;
               const boreParam = worklet.parameters.get('boreType')!;
               const pressParam = worklet.parameters.get('breathPressure')!;
               const embParam = worklet.parameters.get('embouchure')!;
@@ -3041,6 +3120,7 @@ export class SynthEngine {
               const excMixParam = worklet.parameters.get('exciterMix')!;
               const gateParam = worklet.parameters.get('gate')!;
               const velParam = worklet.parameters.get('velocity')!;
+              if (glideConst) glideConst.connect(detuneParam);
 
               const applyPipe = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
                 const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
@@ -3077,11 +3157,11 @@ export class SynthEngine {
 
               audioInputs.set(`${node.id}:exciter`, exciterIn);
               audioOutputs.set(`${node.id}:out`, ampCvTarget);
-              cvTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.08 });
+              cvTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
               cvTargets.set(`${node.id}:breath`, { param: pressParam, baseScale: 0.45 });
               cvTargets.set(`${node.id}:amp`, { param: ampCvTarget.gain, baseScale: 0.75 });
 
-              modParamTargets.set(`${node.id}:pitch`, { param: freqParam, baseScale: baseFreq * 0.06 });
+              modParamTargets.set(`${node.id}:pitch`, { param: detuneParam, baseScale: 1200 });
               modParamTargets.set(`${node.id}:breathPressure`, { param: pressParam, baseScale: 0.45 });
               modParamTargets.set(`${node.id}:embouchure`, { param: embParam, baseScale: 0.4 });
               modParamTargets.set(`${node.id}:breathNoise`, { param: noiseParam, baseScale: 0.5 });
@@ -3112,6 +3192,7 @@ export class SynthEngine {
             lp.type = 'lowpass';
             const excIn = track(ctx.createGain());
 
+            if (glideConst) glideConst.connect(osc.detune);
             osc.connect(lp);
             breathSrc.connect(bp);
             bp.connect(nGain);
@@ -3167,6 +3248,7 @@ export class SynthEngine {
           pitchConst.connect(pitchSum);
           pitchConst.start(now);
           stopCallbacks.push(() => pitchConst.stop());
+          if (glideConst) glideConst.connect(pitchSum);
 
           const fifthCvTarget = track(ctx.createGain());
           fifthCvTarget.gain.value = 1;
@@ -3319,8 +3401,8 @@ export class SynthEngine {
             setAudioParam(fbGain.gain, signedFb, t, 0.01, immediate);
             setAudioParam(dampFilter.frequency, Math.max(900, Math.min(14500 - damping * 13000, ctx.sampleRate * 0.4)), t, 0.01, immediate);
 
-            setAudioParam(dryGain.gain, 1 - mix * 0.45, t, 0.01, immediate);
-            setAudioParam(wetGain.gain, mix * (mode === 'feedforward' ? 0.85 : 0.6), t, 0.01, immediate);
+            setAudioParam(dryGain.gain, mode === 'feedforward' ? 1 - mix * 0.15 : 1 - mix * 0.45, t, 0.01, immediate);
+            setAudioParam(wetGain.gain, mix * (mode === 'feedforward' ? -0.88 : 0.6), t, 0.01, immediate);
           };
 
           applyComb(node.params, now, true);
@@ -4414,10 +4496,13 @@ export class SynthEngine {
         }
 
         case 'lfo': {
-          const isWander = String(node.params.waveform ?? 'sine') === 'wander';
+          const wfMode = String(node.params.waveform ?? 'sine');
+          const isWander = wfMode === 'wander';
+          const isSharpVibrato = wfMode === 'sharpVibrato';
           const lfoOsc = track(ctx.createOscillator());
-          const wanderOsc2 = isWander ? track(ctx.createOscillator()) : null;
+          const wanderOsc2 = isWander || isSharpVibrato ? track(ctx.createOscillator()) : null;
           const wanderOsc3 = isWander ? track(ctx.createOscillator()) : null;
+          const sharpBiasConst = isSharpVibrato ? track(ctx.createConstantSource()) : null;
           const depthGain = track(ctx.createGain());
           const modScaleGain = track(ctx.createGain());
 
@@ -4437,6 +4522,20 @@ export class SynthEngine {
             g1.connect(depthGain);
             g2.connect(depthGain);
             g3.connect(depthGain);
+          } else if (isSharpVibrato && wanderOsc2 && sharpBiasConst) {
+            // Erhu rouxian sharp-biased pitch vibrato: pressing string increases tension sharp (+cents), releasing returns to pitch
+            const g1 = track(ctx.createGain());
+            const g2 = track(ctx.createGain());
+            g1.gain.value = 0.48;
+            g2.gain.value = 0.12;
+            sharpBiasConst.offset.value = 0.42;
+            lfoOsc.type = 'sine';
+            wanderOsc2.type = 'sine';
+            lfoOsc.connect(g1);
+            wanderOsc2.connect(g2);
+            g1.connect(depthGain);
+            g2.connect(depthGain);
+            sharpBiasConst.connect(depthGain);
           } else {
             lfoOsc.connect(depthGain);
           }
@@ -4445,13 +4544,16 @@ export class SynthEngine {
           const applyLfo = (p: Record<string, number | string | boolean>, t: number, immediate = false) => {
             const merged = { ...this.getLiveNodeParams(node.id, node.params), ...p };
             const rate = clampFinite(merged.rate, 0.015, 40, 5.2);
-            if (!isWander) {
+            const humanRate = isSharpVibrato ? rate * (1 + voiceRandom * 0.045) : rate;
+            if (!isWander && !isSharpVibrato) {
               lfoOsc.type = safeOscType(merged.waveform, 'sine');
             }
-            setAudioParam(lfoOsc.frequency, rate, t, 0.015, immediate);
-            if (wanderOsc2 && wanderOsc3) {
+            setAudioParam(lfoOsc.frequency, humanRate, t, 0.015, immediate);
+            if (isWander && wanderOsc2 && wanderOsc3) {
               setAudioParam(wanderOsc2.frequency, rate * 1.4142, t, 0.015, immediate);
               setAudioParam(wanderOsc3.frequency, rate * 0.618, t, 0.015, immediate);
+            } else if (isSharpVibrato && wanderOsc2) {
+              setAudioParam(wanderOsc2.frequency, humanRate * 0.37, t, 0.015, immediate);
             }
             const depth = clampFinite(merged.depth, 0, 1.5, 0.35);
             const effectiveDepth = depth * (1 + this.modWheel * 1.4);
@@ -4471,10 +4573,12 @@ export class SynthEngine {
           lfoOsc.start(now);
           wanderOsc2?.start(now);
           wanderOsc3?.start(now);
+          sharpBiasConst?.start(now);
           stopCallbacks.push(() => {
             lfoOsc.stop();
             wanderOsc2?.stop();
             wanderOsc3?.stop();
+            sharpBiasConst?.stop();
           });
 
           cvOutputs.set(`${node.id}:cv`, modScaleGain);

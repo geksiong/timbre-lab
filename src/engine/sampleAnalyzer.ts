@@ -1,3 +1,4 @@
+import { serializeHarmonics } from './carrierWaves';
 import { createDefaultNode } from './moduleRegistry';
 import { SynthEngine } from './SynthEngine';
 import { ModMatrixSlot, SynthConnection, SynthNode, SynthPatch } from './types';
@@ -28,6 +29,7 @@ export interface AcousticAnalysisProfile {
   pitchConfidence: number;
   vibratoRateHz: number;
   vibratoDepthCents: number;
+  onsetPitchScoopCents: number;
   attackSec: number;
   decaySec: number;
   sustainLevel: number;
@@ -541,6 +543,100 @@ function estimatePitchYIN(
   };
 }
 
+function estimateOnsetPitchScoopCents(
+  samples: Float32Array,
+  sampleRate: number,
+  stableF0: number
+): number {
+  if (!Number.isFinite(stableF0) || stableF0 < 55 || stableF0 > 2200) return 0;
+  const maxWin = Math.min(1536, samples.length);
+  if (samples.length < sampleRate * 0.22 || maxWin < 384) return 0;
+
+  const minLag = Math.max(10, Math.floor(sampleRate / (stableF0 * 1.15)));
+  const maxLag = Math.min(Math.floor(maxWin / 2) - 2, Math.ceil(sampleRate / (stableF0 * 0.8)));
+  if (maxLag <= minLag + 2) return 0;
+
+  // Compute global RMS so we find where the note actually starts above noise floor
+  let sumSq = 0;
+  for (let i = 0; i < samples.length; i += 4) {
+    sumSq += samples[i] * samples[i];
+  }
+  const overallRms = Math.sqrt(sumSq / Math.max(1, Math.ceil(samples.length / 4)));
+  if (overallRms < 1e-4) return 0;
+
+  const hop = Math.max(64, Math.floor(sampleRate * 0.008));
+  let noteStart = 0;
+  for (let i = 0; i < Math.min(samples.length - maxWin, Math.floor(sampleRate * 0.25)); i += hop) {
+    let e = 0;
+    for (let j = 0; j < hop; j++) {
+      const s = samples[i + j] || 0;
+      e += s * s;
+    }
+    if (Math.sqrt(e / hop) >= overallRms * 0.18) {
+      noteStart = i;
+      break;
+    }
+  }
+
+  const onsetCents: number[] = [];
+  const diff = new Float32Array(maxLag + 1);
+  const cmndf = new Float32Array(maxLag + 1);
+  const step = Math.max(128, Math.floor(sampleRate * 0.014));
+  const scanEnd = Math.min(samples.length - maxWin, noteStart + Math.floor(sampleRate * 0.13));
+
+  for (let off = noteStart; off <= scanEnd; off += step) {
+    let e = 0;
+    for (let i = 0; i < maxWin; i++) {
+      const s = samples[off + i] || 0;
+      e += s * s;
+    }
+    if (Math.sqrt(e / maxWin) < overallRms * 0.12) continue;
+
+    diff.fill(0);
+    for (let tau = minLag; tau <= maxLag; tau++) {
+      let s = 0;
+      const limit = maxWin - tau;
+      for (let j = 0; j < limit; j++) {
+        const d = (samples[off + j] || 0) - (samples[off + j + tau] || 0);
+        s += d * d;
+      }
+      diff[tau] = s;
+    }
+    cmndf[0] = 1;
+    let run = 0;
+    for (let tau = 1; tau <= maxLag; tau++) {
+      run += diff[tau];
+      cmndf[tau] = run > 1e-9 ? (diff[tau] * tau) / run : 1;
+    }
+
+    let bestTau = minLag;
+    let minC = Infinity;
+    for (let tau = minLag; tau <= maxLag; tau++) {
+      if (cmndf[tau] < minC) {
+        minC = cmndf[tau];
+        bestTau = tau;
+      }
+    }
+    if (minC < 0.28 && bestTau > minLag && bestTau < maxLag) {
+      const y0 = cmndf[bestTau - 1];
+      const y1 = cmndf[bestTau];
+      const y2 = cmndf[bestTau + 1];
+      const denom = 2 * (2 * y1 - y2 - y0);
+      const shift = Math.abs(denom) > 1e-9 ? (y2 - y0) / denom : 0;
+      const f0 = sampleRate / clamp(bestTau + clamp(shift, -0.5, 0.5), minLag, maxLag);
+      onsetCents.push(1200 * Math.log2(f0 / stableF0));
+    }
+  }
+
+  if (onsetCents.length < 2) return 0;
+  const earlyMin = Math.min(...onsetCents.slice(0, Math.min(3, onsetCents.length)));
+  const settle = onsetCents[onsetCents.length - 1];
+  if (earlyMin <= -18 && earlyMin >= -140 && settle > earlyMin + 12) {
+    return Math.round(clamp(earlyMin, -130, -18));
+  }
+  return 0;
+}
+
 function extractAdsr(
   samples: Float32Array,
   sampleRate: number
@@ -752,18 +848,39 @@ function classifyArchetype(
   ) {
     return 'ensemblePad';
   }
-  // 3. Fast attack + decaying non-sustained envelope -> Physical Plucked / Struck
-  if (profile.attackSec < 0.065 && profile.sustainLevel < 0.28) {
+  // 3. Fast attack + decaying non-sustained envelope (or bright-transient silk/zither plucks) -> Physical Plucked / Struck
+  if (
+    (profile.attackSec < 0.065 && profile.sustainLevel < 0.28) ||
+    (profile.attackSec <= 0.042 &&
+      profile.sustainLevel < 0.56 &&
+      profile.attackBrightnessRatio >= 1.38 &&
+      profile.noiseRatio < 0.26 &&
+      profile.vibratoDepthCents < 12)
+  ) {
     return profile.inharmonicity > 0.22 ? 'fmBell' : 'physicalPluck';
   }
-  // 4. Hollow / flute / breath-rich odd-harmonic sustained winds -> Wind / Formant
+  const h1 = profile.harmonicAmps[0] ?? 0;
+  const h2 = profile.harmonicAmps[1] ?? 0;
+  const h3 = profile.harmonicAmps[2] ?? 0;
+  const h4 = profile.harmonicAmps[3] ?? 0;
+  // 4. Deep/horsehair bowed strings whose F1 soundbox suppresses H1 or boosts H3/H2 with vibrato/even harmonics
+  if (
+    profile.sustainLevel >= 0.28 &&
+    ((h1 < 0.65 && (h3 >= 0.78 || h2 >= 0.78) && h2 + h4 >= 0.34 && profile.noiseRatio < 0.26) ||
+      (h2 >= 0.45 &&
+        (profile.vibratoDepthCents >= 14 || profile.onsetPitchScoopCents <= -18) &&
+        (profile.noiseRatio < 0.27 || h1 < 0.85 || h2 >= 0.82)))
+  ) {
+    return 'physicalBowed';
+  }
+  // 5. Hollow / flute / breath-rich odd-harmonic sustained winds -> Wind / Formant
   if (
     profile.sustainLevel >= 0.28 &&
     (profile.oddEvenRatio >= 0.62 || (profile.noiseRatio >= 0.26 && profile.oddEvenRatio >= 0.5))
   ) {
     return 'windFormant';
   }
-  // 5. Bowed strings: sustained even+odd harmonic body with slower bow onset or expressive vibrato
+  // 6. Bowed strings: sustained even+odd harmonic body with slower bow onset or expressive vibrato
   if (
     profile.sustainLevel >= 0.28 &&
     profile.oddEvenRatio < 0.6 &&
@@ -771,7 +888,7 @@ function classifyArchetype(
   ) {
     return 'physicalBowed';
   }
-  // 6. Wind / Reed / Brass default
+  // 7. Wind / Reed / Brass default
   return 'windFormant';
 }
 
@@ -785,6 +902,7 @@ export function analyzeAudioSample(
   const durationSec = mono.length / sr;
 
   const pitch = estimatePitchYIN(mono, sr);
+  const onsetPitchScoopCents = estimateOnsetPitchScoopCents(mono, sr, pitch.fundamentalHz);
   const midiFloat = 69 + 12 * Math.log2(pitch.fundamentalHz / 440);
   const midiNote = Math.round(clamp(midiFloat, 24, 96));
   const centsOffset = Math.round((midiFloat - midiNote) * 100);
@@ -902,6 +1020,7 @@ export function analyzeAudioSample(
     pitchConfidence: pitch.confidence,
     vibratoRateHz: pitch.vibratoRateHz,
     vibratoDepthCents: pitch.vibratoDepthCents,
+    onsetPitchScoopCents,
     attackSec: adsr.attackSec,
     decaySec: adsr.decaySec,
     sustainLevel: adsr.sustainLevel,
@@ -1018,9 +1137,14 @@ function buildArchetypePatch(
   if (archetype === 'physicalPluck') {
     const str = createDefaultNode('physicalString', 'str1', { x: 48, y: 72 });
     str.label = 'Plucked Resonator';
-    const isHammer = profile.attackSec >= 0.018 && profile.spectralCentroidHz < 1200 && profile.sustainLevel > 0.16;
+    const isHammer =
+      profile.attackSec >= 0.022 &&
+      profile.spectralCentroidHz < 1050 &&
+      profile.sustainLevel > 0.16 &&
+      profile.attackBrightnessRatio < 1.45;
     const damp = clamp(0.76 - profile.spectralCentroidHz / 5200, 0.18, 0.7);
-    const decayParam = clamp(0.962 + Math.min(0.03, profile.decaySec * 0.016), 0.94, 0.992);
+    const baseDecay = profile.sustainLevel >= 0.24 ? 0.98 : 0.962;
+    const decayParam = clamp(baseDecay + Math.min(0.03, profile.decaySec * 0.016), 0.94, 0.992);
     str.params = {
       ...str.params,
       excitation: isHammer ? 'hammer' : 'pluck',
@@ -1087,15 +1211,22 @@ function buildArchetypePatch(
       damping: Number(clamp(0.68 - profile.spectralCentroidHz / 6500, 0.22, 0.66).toFixed(2)),
       decay: 0.986,
       brightness: Number(clamp(profile.spectralCentroidHz / 3200, 0.42, 0.88).toFixed(2)),
-      gain: 0.68,
+      gain: 0.7,
     };
 
+    const harmPeak = Math.max(...profile.harmonicAmps.slice(0, 16), 0);
+    const hasHarmonics = harmPeak > 0.08;
+    const normHarms = hasHarmonics
+      ? Array.from({ length: 16 }, (_, idx) => (profile.harmonicAmps[idx] ?? 0) / harmPeak)
+      : [];
+
     const osc = createDefaultNode('oscillator', 'osc1', { x: 48, y: 248 });
-    osc.label = 'Warm Bowed Core';
+    osc.label = hasHarmonics ? 'Matched Harmonic Core' : 'Warm Bowed Core';
     osc.params = {
       ...osc.params,
-      waveform: 'strings',
-      detune: 3,
+      waveform: hasHarmonics ? 'customHarmonics' : 'strings',
+      ...(hasHarmonics ? { customHarmonics: serializeHarmonics(normHarms) } : {}),
+      detune: 2,
       unison: '1',
       gain: 0.44,
     };
@@ -1107,42 +1238,106 @@ function buildArchetypePatch(
       carrierWave: 'sine',
       modWave: 'sine',
       ratio: 1.0,
-      modIndex: Math.round(clamp(22 + profile.spectralCentroidHz * 0.02, 24, 65)),
-      feedback: 0.06,
-      noiseFmDepth: Math.round(clamp(40 + profile.noiseRatio * 140, 42, 95)),
-      noiseBandwidth: Math.round(clamp(f2.freqHz, 1200, 3600)),
-      gain: 0.18,
+      modIndex: Math.round(clamp(20 + profile.spectralCentroidHz * 0.015, 22, 56)),
+      feedback: 0.05,
+      noiseFmDepth: Math.round(clamp(38 + profile.noiseRatio * 130, 38, 90)),
+      noiseBandwidth: Math.round(clamp(f2.freqHz, 1200, 3400)),
+      gain: 0.16,
     };
 
-    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: 616 });
-    lfo.label = 'Expression Vibrato';
+    const bowSlope = createDefaultNode('slopeEnv', 'slp1', { x: 48, y: 584 });
+    bowSlope.label = 'Bow Catch Transient';
+    bowSlope.params = {
+      mode: 'oneShot',
+      rise: 0.008,
+      fall: 0.085,
+      shape: -0.35,
+      depth: 0.65,
+      bipolar: false,
+    };
+
+    const hasScoop = profile.onsetPitchScoopCents <= -18;
+    const scoopSlope = hasScoop ? createDefaultNode('slopeEnv', 'slp2', { x: 48, y: 712 }) : null;
+    if (scoopSlope) {
+      scoopSlope.label = 'Onset Pitch Scoop';
+      scoopSlope.params = {
+        mode: 'oneShot',
+        rise: 0.002,
+        fall: 0.088,
+        shape: 0.35,
+        depth: 0.85,
+        bipolar: false,
+      };
+    }
+
+    const useSharpVibrato = profile.vibratoDepthCents >= 10 || hasScoop;
+    const lfo = createDefaultNode('lfo', 'lfo1', { x: 48, y: hasScoop ? 840 : 728 });
+    lfo.label = useSharpVibrato ? 'Rouxian Sharp Vibrato' : 'Expression Vibrato';
     lfo.params = {
-      waveform: 'sine',
+      waveform: useSharpVibrato ? 'sharpVibrato' : 'sine',
       rate: Number(profile.vibratoRateHz.toFixed(2)),
-      depth: Number(clamp(0.1 + profile.vibratoDepthCents / 140, 0.1, 0.36).toFixed(2)),
-      delay: Number(clamp(profile.attackSec * 1.1, 0.08, 0.38).toFixed(2)),
+      depth: Number(clamp(0.12 + profile.vibratoDepthCents / 95, 0.12, 0.34).toFixed(2)),
+      delay: Number(clamp(profile.attackSec * 1.1, 0.08, 0.34).toFixed(2)),
     };
 
-    const comb = createDefaultNode('combFilter', 'comb1', { x: 320, y: 96 });
+    const comb = createDefaultNode('combFilter', 'comb1', { x: 300, y: 96 });
     comb.label = 'Bow Point Notch';
     comb.params = {
       ...comb.params,
       mode: 'feedforward',
       keyTrack: true,
-      ratio: 0.14,
+      ratio: 0.15,
       feedback: 0.4,
-      damping: 0.46,
-      mix: 0.34,
+      damping: 0.48,
+      mix: 0.36,
     };
 
-    nodes.push(str, osc, fm, lfo, comb, eq, flt, env, rev, out);
+    const isWarmChestBowed = profile.spectralCentroidHz < 1100 && f1.freqHz <= 500;
+    const nasalMix = isWarmChestBowed ? 0.46 : f2.freqHz <= 2400 ? 0.48 : 0.34;
+    const formantShift = isWarmChestBowed
+      ? clamp(12 * Math.log2(clamp(f1.freqHz, 240, 560) / 435), -8, 4)
+      : clamp(12 * Math.log2(clamp(f1.freqHz, 260, 720) / 560), -10, 6);
+    const fmt = createDefaultNode('formantFilter', 'fmt1', { x: 490, y: 96 });
+    fmt.label = isWarmChestBowed ? 'Chest Body Formant' : 'Body Membrane Formant';
+    fmt.params = {
+      ...fmt.params,
+      vowel: isWarmChestBowed
+        ? Number(clamp(3.2 + (500 - f1.freqHz) / 520, 3.05, 3.85).toFixed(2))
+        : f2.freqHz > 1450
+          ? 0.78
+          : 0.45,
+      shift: Number(formantShift.toFixed(1)),
+      resonance: isWarmChestBowed ? 4.9 : 5.2,
+      spread: isWarmChestBowed ? 1.12 : 0.96,
+      mix: nasalMix,
+    };
+    eq.params = {
+      ...eq.params,
+      outputGain: isWarmChestBowed ? 0.62 : 0.68,
+    };
+
+    nodes.push(str, osc, fm, bowSlope, ...(scoopSlope ? [scoopSlope] : []), lfo, comb, fmt, eq, flt, env, rev, out);
+    const scoopAmt = hasScoop
+      ? Number((-clamp(Math.abs(profile.onsetPitchScoopCents) / (1200 * 0.85), 0.018, 0.12)).toFixed(3))
+      : 0;
     connections.push(
       { id: 'c1', fromNode: 'str1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 1.0 },
       { id: 'c2', fromNode: 'osc1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.8 },
-      { id: 'c3', fromNode: 'fm1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.42 },
-      { id: 'c4', fromNode: 'lfo1', fromPort: 'cv', toNode: 'str1', toPort: 'pitch', amount: 0.18 },
-      { id: 'c5', fromNode: 'lfo1', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: 0.18 },
-      { id: 'c6', fromNode: 'comb1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
+      { id: 'c3', fromNode: 'fm1', fromPort: 'out', toNode: 'comb1', toPort: 'in', amount: 0.4 },
+      { id: 'c3b', fromNode: 'slp1', fromPort: 'cv', toNode: 'str1', toPort: 'bow', amount: 0.36 },
+      ...(scoopSlope
+        ? [
+            { id: 'c4s', fromNode: 'slp2', fromPort: 'cv', toNode: 'str1', toPort: 'pitch', amount: scoopAmt },
+            { id: 'c5s', fromNode: 'slp2', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: scoopAmt },
+            { id: 'c5fs', fromNode: 'slp2', fromPort: 'cv', toNode: 'fm1', toPort: 'pitch', amount: scoopAmt },
+          ]
+        : []),
+      { id: 'c4', fromNode: 'lfo1', fromPort: 'cv', toNode: 'str1', toPort: 'pitch', amount: 0.09 },
+      { id: 'c5', fromNode: 'lfo1', fromPort: 'cv', toNode: 'osc1', toPort: 'pitch', amount: 0.09 },
+      { id: 'c5b', fromNode: 'lfo1', fromPort: 'cv', toNode: 'fm1', toPort: 'pitch', amount: 0.09 },
+      { id: 'c5c', fromNode: 'lfo1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: 0.1 },
+      { id: 'c6', fromNode: 'comb1', fromPort: 'out', toNode: 'fmt1', toPort: 'in', amount: 1.0 },
+      { id: 'c6b', fromNode: 'fmt1', fromPort: 'out', toNode: 'eq1', toPort: 'in', amount: 1.0 },
       { id: 'c7', fromNode: 'eq1', fromPort: 'out', toNode: 'flt1', toPort: 'in', amount: 1.0 },
       { id: 'c8', fromNode: 'flt1', fromPort: 'out', toNode: 'env1', toPort: 'in', amount: 1.0 },
       { id: 'c9', fromNode: 'env1', fromPort: 'cv', toNode: 'flt1', toPort: 'cutoff', amount: 0.28 },
@@ -1156,8 +1351,8 @@ function buildArchetypePatch(
     );
 
     notes.push(
-      `Stick-slip bowed string layered with Warm Bowed oscillator, soft sine Noise-FM rosin, and ${lfo.params.rate} Hz vibrato LFO.`,
-      `Feedforward bow-contact Comb Filter (1/7th bridge ratio) feeding Parametric EQ body formants at ${f1.freqHz} Hz and ${f2.freqHz} Hz.`
+      `Helmholtz bowed waveguide layered with ${hasHarmonics ? 'measured 16-partial Custom Harmonics' : 'Warm Bowed'} core, soft sine Noise-FM rosin, and phase-locked ${lfo.params.rate} Hz ${useSharpVibrato ? 'sharp-biased rouxian' : 'sine'} vibrato.`,
+      `Subtractive bow-point Comb Filter + parallel Formant Body (${fmt.params.mix} mix) + Parametric EQ formants at ${f1.freqHz} Hz and ${f2.freqHz} Hz.${hasScoop ? ` Detected ${profile.onsetPitchScoopCents}c onset pitch scoop.` : ''}`
     );
   } else if (archetype === 'fmBell') {
     // Estimate non-integer harmonic ratio from strongest inharmonic partial
@@ -1385,7 +1580,7 @@ function buildArchetypePatch(
     description: `Offline DSP reconstruction from "${patchName}" (${profile.noteName} · ${Math.round(profile.fundamentalHz)} Hz).`,
     tags: ['matched', 'sample-dsp', archetype],
     polyphony: 8,
-    glideMs: archetype === 'physicalBowed' || archetype === 'windFormant' ? 28 : 0,
+    glideMs: archetype === 'physicalBowed' ? 42 : archetype === 'windFormant' ? 28 : 0,
     macroLabels: {
       x: 'Brightness',
       y: archetype === 'physicalBowed' ? 'Vibrato' : 'Resonance',

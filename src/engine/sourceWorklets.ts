@@ -19,6 +19,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return [
       { name: 'frequency', defaultValue: 220, minValue: 20, maxValue: 4000, automationRate: 'a-rate' },
+      { name: 'detune', defaultValue: 0, minValue: -2400, maxValue: 2400, automationRate: 'a-rate' },
       { name: 'material', defaultValue: 0, minValue: 0, maxValue: 5, automationRate: 'k-rate' },
       { name: 'inharmonicity', defaultValue: 0.15, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
       { name: 'brightness', defaultValue: 0.65, minValue: 0.05, maxValue: 1, automationRate: 'a-rate' },
@@ -83,6 +84,7 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     const ext = inputs[0] && inputs[0][0] ? inputs[0][0] : null;
 
     const freqArr = parameters.frequency;
+    const detuneArr = parameters.detune;
     const brightArr = parameters.brightness;
     const matIdx = Math.round(this.clamp(parameters.material[0], 0, 5, 0));
     const inharm = this.clamp(parameters.inharmonicity[0], 0, 1, 0.15);
@@ -115,7 +117,9 @@ class ModalResonatorProcessor extends AudioWorkletProcessor {
     }
 
     for (let i = 0; i < ch.length; i++) {
-      const f0 = this.clamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 20, 4000, 220);
+      const baseF0 = this.clamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 20, 4000, 220);
+      const detCents = this.clamp(detuneArr.length > 1 ? detuneArr[i] : detuneArr[0], -2400, 2400, 0);
+      const f0 = Math.abs(detCents) > 0.01 ? this.clamp(baseF0 * Math.pow(2, detCents / 1200), 20, 4800, 220) : baseF0;
       const bright = this.clamp(brightArr.length > 1 ? brightArr[i] : brightArr[0], 0.05, 1, 0.65);
 
       let exc = 0;
@@ -193,6 +197,7 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
   static get parameterDescriptors() {
     return [
       { name: 'frequency', defaultValue: 220, minValue: 25, maxValue: 4000, automationRate: 'a-rate' },
+      { name: 'detune', defaultValue: 0, minValue: -2400, maxValue: 2400, automationRate: 'a-rate' },
       { name: 'boreType', defaultValue: 0, minValue: 0, maxValue: 3, automationRate: 'k-rate' },
       { name: 'breathPressure', defaultValue: 0.65, minValue: 0.05, maxValue: 1.25, automationRate: 'a-rate' },
       { name: 'embouchure', defaultValue: 0.55, minValue: 0.05, maxValue: 1.0, automationRate: 'k-rate' },
@@ -260,6 +265,7 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
     const ext = inputs[0] && inputs[0][0] ? inputs[0][0] : null;
 
     const freqArr = parameters.frequency;
+    const detuneArr = parameters.detune;
     const pressArr = parameters.breathPressure;
     const boreType = Math.round(this.clamp(parameters.boreType[0], 0, 3, 0));
     const embouchure = this.clamp(parameters.embouchure[0], 0.05, 1.0, 0.55);
@@ -285,7 +291,9 @@ class BlownPipeProcessor extends AudioWorkletProcessor {
     const isOrgan = boreType === 3;
 
     for (let i = 0; i < ch.length; i++) {
-      const freq = this.clamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 25, 4000, 220);
+      const baseF = this.clamp(freqArr.length > 1 ? freqArr[i] : freqArr[0], 25, 4000, 220);
+      const detCents = this.clamp(detuneArr.length > 1 ? detuneArr[i] : detuneArr[0], -2400, 2400, 0);
+      const freq = Math.abs(detCents) > 0.01 ? this.clamp(baseF * Math.pow(2, detCents / 1200), 25, 4800, 220) : baseF;
       const pressKnob = this.clamp(pressArr.length > 1 ? pressArr[i] : pressArr[0], 0.05, 1.25, 0.65);
 
       const targetEnv = gate > 0.5 ? 1.0 : 0.0;

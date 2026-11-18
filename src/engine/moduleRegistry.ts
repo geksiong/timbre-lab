@@ -1056,6 +1056,7 @@ export const MODULE_REGISTRY: Record<ModuleType, ModuleDefinition> = {
         options: [
           { value: 'sine', label: 'Sine' },
           { value: 'triangle', label: 'Triangle' },
+          { value: 'sharpVibrato', label: 'Sharp Vibrato (Erhu Rouxian)' },
           { value: 'wander', label: 'Organic Wander' },
           { value: 'square', label: 'Square' },
           { value: 'sawtooth', label: 'Ramp' },
