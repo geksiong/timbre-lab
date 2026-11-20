@@ -18,7 +18,6 @@ import {
 } from '../engine/moduleRegistry';
 import {
   HARMONIC_PRESETS,
-  computeCarrierPreviewSamples,
   getFormantVowelName,
   parseHarmonicsString,
   serializeHarmonics,
@@ -27,14 +26,18 @@ import {
   CORE_ESSENTIAL_PARAM_KEYS,
   computePatchModulationSummary,
 } from '../engine/modulationSummary';
+import { SynthEngine } from '../engine/SynthEngine';
 import { ParamSpec, SynthConnection, SynthNode, SynthPatch } from '../engine/types';
 import { MODULATABLE_PARAMS } from './ModMatrixPanel';
+import { ModuleVisualizer } from './ModuleVisualizer';
 import { PrecisionSlider } from './PrecisionSlider';
 
 interface NodeInspectorProps {
   patch: SynthPatch;
   selectedNodeId: string | null;
   showAllParams: boolean;
+  engine?: SynthEngine;
+  theme?: 'light' | 'dark';
   onToggleShowAllParams: () => void;
   onUpdateNodeParam: (
     nodeId: string,
@@ -57,168 +60,6 @@ interface NodeInspectorProps {
   onCollapse?: () => void;
 }
 
-function biquadDbAtFreq(
-  type: 'lowshelf' | 'highshelf' | 'peaking',
-  freqHz: number,
-  f0: number,
-  gainDb: number,
-  q: number,
-  fs = 48000
-): number {
-  const A = Math.pow(10, gainDb / 40);
-  const w0 = (2 * Math.PI * Math.max(20, Math.min(20000, f0))) / fs;
-  const cosW0 = Math.cos(w0);
-  const sinW0 = Math.sin(w0);
-  const alpha =
-    type === 'peaking'
-      ? sinW0 / (2 * Math.max(0.3, q))
-      : (sinW0 / 2) * Math.sqrt((A + 1 / A) * (1 / 0.707 - 1) + 2);
-
-  let b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
-
-  if (type === 'peaking') {
-    b0 = 1 + alpha * A;
-    b1 = -2 * cosW0;
-    b2 = 1 - alpha * A;
-    a0 = 1 + alpha / A;
-    a1 = -2 * cosW0;
-    a2 = 1 - alpha / A;
-  } else if (type === 'lowshelf') {
-    const sq = 2 * Math.sqrt(A) * alpha;
-    b0 = A * (A + 1 - (A - 1) * cosW0 + sq);
-    b1 = 2 * A * (A - 1 - (A + 1) * cosW0);
-    b2 = A * (A + 1 - (A - 1) * cosW0 - sq);
-    a0 = A + 1 + (A - 1) * cosW0 + sq;
-    a1 = -2 * (A - 1 + (A + 1) * cosW0);
-    a2 = A + 1 + (A - 1) * cosW0 - sq;
-  } else {
-    const sq = 2 * Math.sqrt(A) * alpha;
-    b0 = A * (A + 1 + (A - 1) * cosW0 + sq);
-    b1 = -2 * A * (A - 1 + (A + 1) * cosW0);
-    b2 = A * (A + 1 + (A - 1) * cosW0 - sq);
-    a0 = A + 1 - (A - 1) * cosW0 + sq;
-    a1 = 2 * (A - 1 - (A + 1) * cosW0);
-    a2 = A + 1 - (A - 1) * cosW0 - sq;
-  }
-
-  const w = (2 * Math.PI * freqHz) / fs;
-  const cosW = Math.cos(w);
-  const sinW = Math.sin(w);
-  const cos2W = Math.cos(2 * w);
-  const sin2W = Math.sin(2 * w);
-
-  const numRe = b0 + b1 * cosW + b2 * cos2W;
-  const numIm = -(b1 * sinW + b2 * sin2W);
-  const denRe = a0 + a1 * cosW + a2 * cos2W;
-  const denIm = -(a1 * sinW + a2 * sin2W);
-
-  const magSq = (numRe * numRe + numIm * numIm) / Math.max(1e-12, denRe * denRe + denIm * denIm);
-  return 10 * Math.log10(Math.max(1e-6, magSq));
-}
-
-const EqResponseCurve: React.FC<{ params: Record<string, number | string | boolean> }> = ({
-  params,
-}) => {
-  const pathData = useMemo(() => {
-    const lowFreq = Number(params.lowFreq ?? 180);
-    const lowGain = Number(params.lowGain ?? 2.5);
-    const mid1Freq = Number(params.mid1Freq ?? 420);
-    const mid1Gain = Number(params.mid1Gain ?? 5.0);
-    const mid1Q = Number(params.mid1Q ?? 2.2);
-    const mid2Freq = Number(params.mid2Freq ?? 2400);
-    const mid2Gain = Number(params.mid2Gain ?? 4.5);
-    const mid2Q = Number(params.mid2Q ?? 2.4);
-    const highFreq = Number(params.highFreq ?? 5200);
-    const highGain = Number(params.highGain ?? -2.0);
-
-    const w = 240;
-    const h = 84;
-    const minF = 40;
-    const maxF = 15000;
-    const points: string[] = [];
-
-    for (let i = 0; i <= 48; i++) {
-      const t = i / 48;
-      const f = minF * Math.pow(maxF / minF, t);
-      const db =
-        biquadDbAtFreq('lowshelf', f, lowFreq, lowGain, 0.7) +
-        biquadDbAtFreq('peaking', f, mid1Freq, mid1Gain, mid1Q) +
-        biquadDbAtFreq('peaking', f, mid2Freq, mid2Gain, mid2Q) +
-        biquadDbAtFreq('highshelf', f, highFreq, highGain, 0.7);
-      const clampedDb = Math.max(-18, Math.min(18, db));
-      const x = t * w;
-      const y = h / 2 - (clampedDb / 18) * (h / 2 - 6);
-      points.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`);
-    }
-    return points.join(' ');
-  }, [params]);
-
-  return (
-    <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 space-y-1.5">
-      <div className="flex items-center justify-between text-[11px]">
-        <span className="font-medium text-slate-700 dark:text-slate-300">Body Resonance Curve</span>
-        <span className="font-mono tabular-nums text-slate-500">40 Hz – 15 kHz</span>
-      </div>
-      <svg viewBox="0 0 240 84" className="w-full h-[84px] overflow-visible">
-        <line x1="0" y1="42" x2="240" y2="42" className="stroke-slate-300 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
-        <line x1="60" y1="0" x2="60" y2="84" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
-        <line x1="120" y1="0" x2="120" y2="84" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
-        <line x1="180" y1="0" x2="180" y2="84" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
-        <path d={pathData} fill="none" className="stroke-amber-600 dark:stroke-amber-500" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    </div>
-  );
-};
-
-const CarrierWaveformPreview: React.FC<{
-  waveform: string;
-  params: Record<string, number | string | boolean>;
-}> = ({ waveform, params }) => {
-  const { pathData, badgeText } = useMemo(() => {
-    const samples = computeCarrierPreviewSamples(waveform, params, 128);
-    const w = 240;
-    const h = 68;
-    const mid = h / 2;
-    const pts: string[] = [];
-    for (let i = 0; i < samples.length; i++) {
-      const x = (i / (samples.length - 1)) * w;
-      const y = mid - samples[i] * (mid - 6);
-      pts.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`);
-    }
-
-    let badge = waveform;
-    if (waveform === 'pulse') {
-      badge = `${Math.round(Number(params.pulseWidth ?? 0.35) * 100)}% duty`;
-    } else if (waveform === 'wavetable') {
-      badge = `${String(params.wavetableBank ?? 'analog')} · ${Math.round(Number(params.wavetablePos ?? 0.25) * 100)}%`;
-    } else if (waveform === 'vocalFormant') {
-      const shift = Number(params.formantShift ?? 0);
-      badge = `Vowel ${getFormantVowelName(Number(params.formantVowel ?? 0))}${shift !== 0 ? ` (${shift > 0 ? '+' : ''}${shift}st)` : ''}`;
-    } else if (waveform === 'filteredNoise') {
-      badge = `${Number(params.noiseCutoff ?? 1).toFixed(2)}x · Q ${Number(params.noiseQ ?? 8).toFixed(1)}`;
-    } else if (waveform === 'customHarmonics') {
-      badge = '16-partial additive';
-    }
-
-    return { pathData: pts.join(' '), badgeText: badge };
-  }, [waveform, params]);
-
-  return (
-    <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md p-2.5 space-y-1.5">
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="font-medium text-slate-700 dark:text-slate-300">Carrier Cycle Preview</span>
-        <span className="font-mono tabular-nums text-amber-700 dark:text-amber-400 truncate">
-          {badgeText}
-        </span>
-      </div>
-      <svg viewBox="0 0 240 68" className="w-full h-[68px] overflow-visible">
-        <line x1="0" y1="34" x2="240" y2="34" className="stroke-slate-300 dark:stroke-slate-800" strokeWidth="1" strokeDasharray="3 3" />
-        <line x1="120" y1="0" x2="120" y2="68" className="stroke-slate-200 dark:stroke-slate-800" strokeWidth="1" />
-        <path d={pathData} fill="none" className="stroke-amber-600 dark:stroke-amber-400" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </div>
-  );
-};
 
 const CustomHarmonicsEditor: React.FC<{
   rawValue: unknown;
@@ -325,6 +166,8 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
   patch,
   selectedNodeId,
   showAllParams,
+  engine,
+  theme = 'light',
   onToggleShowAllParams,
   onUpdateNodeParam,
   onToggleBypass,
@@ -460,6 +303,13 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
         </div>
       </div>
 
+      {/* Pinned Parameter-Reactive Waveform / Response Visualizer (always visible while scrolling) */}
+      {selectedNode && def && (
+        <div className="shrink-0 px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0D121C]">
+          <ModuleVisualizer node={selectedNode} engine={engine} theme={theme} />
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {selectedNode && def ? (
           <>
@@ -543,23 +393,6 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                   </div>
                 )}
               </div>
-            )}
-
-            {/* Live Frequency Response Graph for Parametric EQ */}
-            {selectedNode.type === 'parametricEq' && (
-              <EqResponseCurve params={selectedNode.params} />
-            )}
-
-            {/* Live Carrier Waveform Preview for Oscillator & FM Operator */}
-            {(selectedNode.type === 'oscillator' || selectedNode.type === 'fmOperator') && (
-              <CarrierWaveformPreview
-                waveform={String(
-                  selectedNode.type === 'oscillator'
-                    ? selectedNode.params.waveform ?? 'sawtooth'
-                    : selectedNode.params.carrierWave ?? 'sine'
-                )}
-                params={selectedNode.params}
-              />
             )}
 
             {/* Custom 16-Partial Harmonic Editor */}

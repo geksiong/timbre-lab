@@ -1527,6 +1527,8 @@ export default function App() {
               patch={patch}
               selectedNodeId={selectedNodeId}
               showAllParams={showAllParams}
+              engine={engine}
+              theme={theme}
               onToggleShowAllParams={() => setShowAllParams((v) => !v)}
               onUpdateNodeParam={handleUpdateNodeParam}
               onToggleBypass={handleToggleBypass}
