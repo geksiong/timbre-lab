@@ -8,6 +8,8 @@ interface ModMatrixPanelProps {
   patch: SynthPatch;
   onUpdateModMatrix: (slots: ModMatrixSlot[]) => void;
   onBackToPatchbay?: () => void;
+  focusedNodeId?: string | null;
+  onClearFocus?: () => void;
 }
 
 interface TargetOption {
@@ -17,7 +19,7 @@ interface TargetOption {
   label: string;
 }
 
-const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
+export const MODULATABLE_PARAMS: Record<string, { key: string; label: string }[]> = {
   oscillator: [
     { key: 'pitch', label: 'Pitch' },
     { key: 'detune', label: 'Fine Detune' },
@@ -204,8 +206,14 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
   patch,
   onUpdateModMatrix,
   onBackToPatchbay,
+  focusedNodeId,
+  onClearFocus,
 }) => {
   const slots = patch.modMatrix ?? [];
+  const focusedNode = focusedNodeId ? patch.nodes.find((n) => n.id === focusedNodeId) : null;
+  const visibleSlots = focusedNode
+    ? slots.filter((s) => s.targetNodeId === focusedNode.id || s.source === focusedNode.id)
+    : slots;
 
   const sourceOptions = useMemo(() => {
     const base = [
@@ -252,17 +260,19 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
   }, [patch.nodes]);
 
   const handleAddSlot = () => {
-    const firstTarget = targetOptions[0];
-    if (!firstTarget) return;
+    const preferredTarget = focusedNode
+      ? targetOptions.find((t) => t.nodeId === focusedNode.id) ?? targetOptions[0]
+      : targetOptions[0];
+    if (!preferredTarget) return;
     const defaultSrc =
-      patch.nodes.find((n) => n.type === 'lfo')?.id || 'velocity';
+      patch.nodes.find((n) => n.type === 'lfo')?.id || 'macroX';
     const next: ModMatrixSlot = {
       id: `mod_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
       enabled: true,
       source: defaultSrc,
       via: 'none',
-      targetNodeId: firstTarget.nodeId,
-      targetParam: firstTarget.paramKey,
+      targetNodeId: preferredTarget.nodeId,
+      targetParam: preferredTarget.paramKey,
       amount: 0.35,
       curve: 'linear',
     };
@@ -647,14 +657,37 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
           </div>
         </div>
 
+        {focusedNode && (
+          <div className="flex items-center justify-between gap-2 px-3.5 py-2 rounded-lg bg-cyan-500/10 border border-cyan-500/35 text-xs">
+            <span className="text-cyan-900 dark:text-cyan-200">
+              Showing modulation routes for{' '}
+              <span className="font-semibold">
+                {focusedNode.label || MODULE_REGISTRY[focusedNode.type]?.label || focusedNode.type}
+              </span>{' '}
+              ({visibleSlots.length} of {slots.length} slots)
+            </span>
+            {onClearFocus && (
+              <button
+                type="button"
+                onClick={onClearFocus}
+                className="px-2.5 py-1 rounded bg-white dark:bg-[#0B0F17] border border-cyan-500/40 text-cyan-800 dark:text-cyan-300 font-medium hover:bg-cyan-500/15 transition-colors whitespace-nowrap"
+              >
+                Show All Slots
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Routing Rows */}
-        {slots.length === 0 ? (
+        {visibleSlots.length === 0 ? (
           <div className="bg-white dark:bg-[#111622] border border-slate-200 dark:border-slate-800 rounded-lg p-8 text-center space-y-3">
             <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
-              No modulation matrix slots configured for this patch yet.
+              {focusedNode
+                ? `No modulation matrix slots connected to ${focusedNode.label || MODULE_REGISTRY[focusedNode.type]?.label} yet.`
+                : 'No modulation matrix slots configured for this patch yet.'}
             </p>
             <p className="text-xs text-slate-600 dark:text-slate-400 max-w-md mx-auto leading-relaxed">
-              Add a custom modulation slot or try one of the Bowed Expression Recipes above to make notes respond dynamically to how hard and expressively you play.
+              Add a custom modulation slot or try one of the expression recipes above to make notes respond dynamically to Macro X/Y, velocity, or LFOs.
             </p>
           </div>
         ) : (
@@ -669,7 +702,7 @@ export const ModMatrixPanel: React.FC<ModMatrixPanelProps> = ({
               <div className="text-right">Remove</div>
             </div>
 
-            {slots.map((slot) => {
+            {visibleSlots.map((slot) => {
               const targetVal = `${slot.targetNodeId}:${slot.targetParam}`;
               return (
                 <div

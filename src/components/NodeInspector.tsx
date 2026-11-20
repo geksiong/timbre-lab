@@ -1,5 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Trash2, Power, Copy, Unlink, HelpCircle, ChevronDown, ChevronUp, PanelRightClose } from 'lucide-react';
+import {
+  Trash2,
+  Power,
+  Copy,
+  Unlink,
+  HelpCircle,
+  ChevronDown,
+  ChevronUp,
+  PanelRightClose,
+  Sliders,
+  ArrowUpRight,
+} from 'lucide-react';
 import {
   MODULE_CATEGORY_META,
   MODULE_REGISTRY,
@@ -12,21 +23,37 @@ import {
   parseHarmonicsString,
   serializeHarmonics,
 } from '../engine/carrierWaves';
-import { SynthConnection, SynthNode, SynthPatch } from '../engine/types';
+import {
+  CORE_ESSENTIAL_PARAM_KEYS,
+  computePatchModulationSummary,
+} from '../engine/modulationSummary';
+import { ParamSpec, SynthConnection, SynthNode, SynthPatch } from '../engine/types';
+import { MODULATABLE_PARAMS } from './ModMatrixPanel';
 import { PrecisionSlider } from './PrecisionSlider';
 
 interface NodeInspectorProps {
   patch: SynthPatch;
   selectedNodeId: string | null;
-  onUpdateNodeParam: (nodeId: string, key: string, value: number | string | boolean) => void;
+  showAllParams: boolean;
+  onToggleShowAllParams: () => void;
+  onUpdateNodeParam: (
+    nodeId: string,
+    key: string,
+    value: number | string | boolean,
+    recordHistory?: boolean
+  ) => void;
   onToggleBypass: (nodeId: string) => void;
   onDeleteNode: (nodeId: string) => void;
   onDuplicateNode: (nodeId: string) => void;
-  onUpdateConnectionAmount: (connId: string, amount: number) => void;
+  onUpdateConnectionAmount: (connId: string, amount: number, recordHistory?: boolean) => void;
   onDeleteConnection: (connId: string) => void;
   onUpdatePatchMeta: (
     updates: Partial<Pick<SynthPatch, 'name' | 'polyphony' | 'description' | 'macroLabels'>>
   ) => void;
+  onOpenModMatrixForNode?: (nodeId: string) => void;
+  onQuickMapMacro?: (nodeId: string, paramKey: string, axis: 'macroX' | 'macroY') => void;
+  onDragStartHistory?: () => void;
+  onCommitHistory?: () => void;
   onCollapse?: () => void;
 }
 
@@ -297,6 +324,8 @@ const CustomHarmonicsEditor: React.FC<{
 export const NodeInspector: React.FC<NodeInspectorProps> = ({
   patch,
   selectedNodeId,
+  showAllParams,
+  onToggleShowAllParams,
   onUpdateNodeParam,
   onToggleBypass,
   onDeleteNode,
@@ -304,11 +333,27 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
   onUpdateConnectionAmount,
   onDeleteConnection,
   onUpdatePatchMeta,
+  onOpenModMatrixForNode,
+  onQuickMapMacro,
+  onDragStartHistory,
+  onCommitHistory,
   onCollapse,
 }) => {
-  const [guideExpanded, setGuideExpanded] = useState(true);
+  const [guideExpanded, setGuideExpanded] = useState(false);
+  const [localAdvancedOpen, setLocalAdvancedOpen] = useState(false);
   const selectedNode: SynthNode | undefined = patch.nodes.find((n) => n.id === selectedNodeId);
   const def = selectedNode ? MODULE_REGISTRY[selectedNode.type] : null;
+
+  const modSummary = useMemo(() => {
+    if (!selectedNode) return null;
+    return computePatchModulationSummary(patch).get(selectedNode.id) ?? null;
+  }, [patch, selectedNode]);
+
+  const modulatableKeySet = useMemo(() => {
+    if (!selectedNode) return new Set<string>();
+    const list = MODULATABLE_PARAMS[selectedNode.type] ?? [];
+    return new Set(list.map((p) => p.key));
+  }, [selectedNode]);
 
   const nodeConnections: SynthConnection[] = selectedNode
     ? patch.connections.filter(
@@ -320,6 +365,40 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
     const n = patch.nodes.find((x) => x.id === id);
     return n?.label || (n ? MODULE_REGISTRY[n.type].label : id);
   };
+
+  const formatSourceReadable = (src: string) => {
+    if (src === 'macroX') return `Macro X (${patch.macroLabels?.x ?? 'Tone'})`;
+    if (src === 'macroY') return `Macro Y (${patch.macroLabels?.y ?? 'Space'})`;
+    if (src === 'velocity') return 'Velocity';
+    if (src === 'modWheel') return 'Mod Wheel';
+    if (src === 'keyTrack') return 'Key Track';
+    if (src === 'random') return 'Per-Note Random';
+    if (src === 'noise') return 'Friction Noise';
+    return getNodeLabel(src);
+  };
+
+  const { coreParams, advancedParams } = useMemo(() => {
+    if (!selectedNode || !def) return { coreParams: [] as ParamSpec[], advancedParams: [] as ParamSpec[] };
+    const visible = def.params.filter(
+      (p) => !p.visibleWhen || p.visibleWhen(selectedNode.params)
+    );
+    if (visible.length <= 6) {
+      return { coreParams: visible, advancedParams: [] as ParamSpec[] };
+    }
+    const coreKeyList = CORE_ESSENTIAL_PARAM_KEYS[selectedNode.type];
+    if (coreKeyList) {
+      const coreSet = new Set(coreKeyList);
+      const core = visible.filter((p) => coreSet.has(p.key));
+      const adv = visible.filter((p) => !coreSet.has(p.key));
+      if (core.length > 0 && adv.length > 0) {
+        return { coreParams: core, advancedParams: adv };
+      }
+    }
+    return {
+      coreParams: visible.slice(0, 5),
+      advancedParams: visible.slice(5),
+    };
+  }, [selectedNode, def]);
 
   return (
     <aside className="h-full bg-white dark:bg-[#111622] border-l border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden">
@@ -384,6 +463,54 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {selectedNode && def ? (
           <>
+            {/* Modulation Links Driving This Module */}
+            {modSummary && modSummary.totalRoutes > 0 && (
+              <div className="bg-cyan-500/8 dark:bg-cyan-500/10 border border-cyan-600/30 dark:border-cyan-500/35 rounded-md p-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-cyan-900 dark:text-cyan-200">
+                    Active Modulations ({modSummary.totalRoutes})
+                  </span>
+                  {onOpenModMatrixForNode && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenModMatrixForNode(selectedNode.id)}
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan-700 dark:text-cyan-300 hover:underline"
+                    >
+                      <span>Mod Matrix</span>
+                      <ArrowUpRight className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+                {modSummary.slots.length > 0 && (
+                  <div className="space-y-1">
+                    {modSummary.slots.map((slot) => (
+                      <div
+                        key={slot.id}
+                        className="flex items-center justify-between gap-2 text-[11px] text-slate-700 dark:text-slate-300"
+                      >
+                        <span className="truncate">
+                          {formatSourceReadable(slot.source)} →{' '}
+                          <span className="font-medium text-slate-900 dark:text-slate-100">
+                            {slot.targetParam}
+                          </span>
+                        </span>
+                        <span className="font-mono tabular-nums text-cyan-700 dark:text-cyan-300 shrink-0">
+                          {slot.amount >= 0 ? '+' : ''}
+                          {Math.round(slot.amount * 100)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {modSummary.cvConnectionCount > 0 && (
+                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                    +{modSummary.cvConnectionCount} direct patchbay CV cable
+                    {modSummary.cvConnectionCount > 1 ? 's' : ''} attached
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Plain-English Acoustic Guide & Bowed Instrument Tip */}
             {(def.acousticGuide || def.bowedTip) && (
               <div className="bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-md overflow-hidden">
@@ -442,16 +569,83 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                 selectedNode.params.carrierWave === 'customHarmonics')) && (
               <CustomHarmonicsEditor
                 rawValue={selectedNode.params.customHarmonics}
-                onChange={(val) => onUpdateNodeParam(selectedNode.id, 'customHarmonics', val)}
+                onChange={(val) => onUpdateNodeParam(selectedNode.id, 'customHarmonics', val, true)}
               />
             )}
 
+            {/* Progressive Disclosure Toolbar when module has Advanced params */}
+            {advancedParams.length > 0 && (
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 inline-flex items-center gap-1.5">
+                  <Sliders className="w-3 h-3" />
+                  <span>
+                    {showAllParams
+                      ? `All Parameters (${coreParams.length + advancedParams.length})`
+                      : `Core Controls (${coreParams.length})`}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={onToggleShowAllParams}
+                  className={`px-2 py-0.5 text-[11px] font-medium rounded border transition-colors ${
+                    showAllParams
+                      ? 'bg-cyan-500/15 border-cyan-600/45 text-cyan-800 dark:text-cyan-300'
+                      : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-400'
+                  }`}
+                >
+                  {showAllParams ? 'Pro: All' : 'Essential'}
+                </button>
+              </div>
+            )}
+
             <div className="space-y-4">
-              {def.params.map((param) => {
-                if (param.visibleWhen && !param.visibleWhen(selectedNode.params)) {
-                  return null;
-                }
+              {coreParams.map((param) => {
                 const rawVal = selectedNode.params[param.key] ?? param.defaultValue;
+                const paramTags = modSummary?.paramSourceTags[param.key] ?? [];
+                const canQuickMap = modulatableKeySet.has(param.key);
+
+                const renderParamHeaderExtras = () => (
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {paramTags.map((tag) => (
+                        <span
+                          key={tag}
+                          className="text-[10px] font-mono font-semibold text-cyan-700 dark:text-cyan-300 bg-cyan-500/12 border border-cyan-600/30 dark:border-cyan-500/35 px-1.5 py-0.5 rounded"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                    {canQuickMap && onQuickMapMacro && (
+                      <div className="flex items-center gap-1 opacity-75 hover:opacity-100 transition-opacity">
+                        <button
+                          type="button"
+                          onClick={() => onQuickMapMacro(selectedNode.id, param.key, 'macroX')}
+                          title={`Map ${param.label} to Macro X`}
+                          className={`px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+                            paramTags.includes('X')
+                              ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-800 dark:text-cyan-200'
+                              : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-cyan-700 dark:hover:text-cyan-300 hover:border-cyan-500/50'
+                          }`}
+                        >
+                          +X
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onQuickMapMacro(selectedNode.id, param.key, 'macroY')}
+                          title={`Map ${param.label} to Macro Y`}
+                          className={`px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+                            paramTags.includes('Y')
+                              ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-800 dark:text-cyan-200'
+                              : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-cyan-700 dark:hover:text-cyan-300 hover:border-cyan-500/50'
+                          }`}
+                        >
+                          +Y
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
 
                 if (param.type === 'toggle') {
                   const enabled = Boolean(rawVal);
@@ -463,7 +657,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                         </span>
                         <button
                           type="button"
-                          onClick={() => onUpdateNodeParam(selectedNode.id, param.key, !enabled)}
+                          onClick={() => onUpdateNodeParam(selectedNode.id, param.key, !enabled, true)}
                           className={`h-8 px-3 rounded text-xs font-medium border transition-colors ${
                             enabled
                               ? 'bg-cyan-500/15 border-cyan-600/50 dark:border-cyan-500/60 text-cyan-800 dark:text-cyan-300'
@@ -489,7 +683,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                       <select
                         value={String(rawVal)}
                         onChange={(e) =>
-                          onUpdateNodeParam(selectedNode.id, param.key, e.target.value)
+                          onUpdateNodeParam(selectedNode.id, param.key, e.target.value, true)
                         }
                         className="w-full h-10 px-3 text-xs bg-slate-50 dark:bg-[#0B0F17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 focus:outline-none focus:border-amber-500"
                       >
@@ -520,6 +714,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
 
                 return (
                   <div key={param.key} className="space-y-1">
+                    {(paramTags.length > 0 || canQuickMap) && renderParamHeaderExtras()}
                     <PrecisionSlider
                       label={
                         param.key === 'formantVowel'
@@ -527,6 +722,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                           : param.label
                       }
                       value={numVal}
+                      defaultValue={typeof param.defaultValue === 'number' ? param.defaultValue : undefined}
                       min={min}
                       max={max}
                       step={step}
@@ -534,7 +730,9 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                       scale={param.scale || 'linear'}
                       unit={param.unit}
                       accent={isCyan ? 'cyan' : 'amber'}
-                      onChange={(val) => onUpdateNodeParam(selectedNode.id, param.key, val)}
+                      onDragStart={onDragStartHistory}
+                      onCommit={onCommitHistory}
+                      onChange={(val) => onUpdateNodeParam(selectedNode.id, param.key, val, false)}
                     />
                     {param.tooltip && (
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{param.tooltip}</p>
@@ -542,6 +740,169 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                   </div>
                 );
               })}
+
+              {advancedParams.length > 0 && (
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-800/80 space-y-3">
+                  {!showAllParams && (
+                    <button
+                      type="button"
+                      onClick={() => setLocalAdvancedOpen((v) => !v)}
+                      className="w-full px-3 py-2 rounded-md bg-slate-50 dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 flex items-center justify-between text-xs font-medium text-slate-700 dark:text-slate-300 transition-colors"
+                    >
+                      <span>Advanced Calibration ({advancedParams.length})</span>
+                      {localAdvancedOpen ? (
+                        <ChevronUp className="w-3.5 h-3.5 text-slate-500" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5 text-slate-500" />
+                      )}
+                    </button>
+                  )}
+
+                  {(showAllParams || localAdvancedOpen) && (
+                    <div className="space-y-4 pt-1">
+                      {advancedParams.map((param) => {
+                        const rawVal = selectedNode.params[param.key] ?? param.defaultValue;
+                        const paramTags = modSummary?.paramSourceTags[param.key] ?? [];
+                        const canQuickMap = modulatableKeySet.has(param.key);
+
+                        if (param.type === 'toggle') {
+                          const enabled = Boolean(rawVal);
+                          return (
+                            <div key={param.key} className="space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                                  {param.label}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => onUpdateNodeParam(selectedNode.id, param.key, !enabled, true)}
+                                  className={`h-8 px-3 rounded text-xs font-medium border transition-colors ${
+                                    enabled
+                                      ? 'bg-cyan-500/15 border-cyan-600/50 dark:border-cyan-500/60 text-cyan-800 dark:text-cyan-300'
+                                      : 'bg-slate-100 dark:bg-[#0B0F17] border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                                  }`}
+                                >
+                                  {enabled ? 'On' : 'Off'}
+                                </button>
+                              </div>
+                              {param.tooltip && (
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{param.tooltip}</p>
+                              )}
+                            </div>
+                          );
+                        }
+
+                        if (param.type === 'select' && param.options) {
+                          return (
+                            <div key={param.key} className="space-y-1.5">
+                              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                                {param.label}
+                              </label>
+                              <select
+                                value={String(rawVal)}
+                                onChange={(e) =>
+                                  onUpdateNodeParam(selectedNode.id, param.key, e.target.value, true)
+                                }
+                                className="w-full h-10 px-3 text-xs bg-slate-50 dark:bg-[#0B0F17] border border-slate-300 dark:border-slate-700 rounded-md text-slate-900 dark:text-slate-100 focus:outline-none focus:border-amber-500"
+                              >
+                                {param.options.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                              {param.tooltip && (
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{param.tooltip}</p>
+                              )}
+                            </div>
+                          );
+                        }
+
+                        const numVal = Number(rawVal);
+                        const min = param.min ?? 0;
+                        const max = param.max ?? 1;
+                        const step = param.step ?? 0.01;
+                        const isCyan = isCyanModuleCategory(def.category);
+                        const isInt =
+                          param.key === 'octave' ||
+                          param.key === 'semitone' ||
+                          param.key === 'grainSize' ||
+                          param.key === 'pitchShift' ||
+                          param.key === 'preDelay';
+
+                        return (
+                          <div key={param.key} className="space-y-1">
+                            {(paramTags.length > 0 || canQuickMap) && (
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <div className="flex items-center gap-1 flex-wrap">
+                                  {paramTags.map((tag) => (
+                                    <span
+                                      key={tag}
+                                      className="text-[10px] font-mono font-semibold text-cyan-700 dark:text-cyan-300 bg-cyan-500/12 border border-cyan-600/30 dark:border-cyan-500/35 px-1.5 py-0.5 rounded"
+                                    >
+                                      {tag}
+                                    </span>
+                                  ))}
+                                </div>
+                                {canQuickMap && onQuickMapMacro && (
+                                  <div className="flex items-center gap-1 opacity-75 hover:opacity-100 transition-opacity">
+                                    <button
+                                      type="button"
+                                      onClick={() => onQuickMapMacro(selectedNode.id, param.key, 'macroX')}
+                                      title={`Map ${param.label} to Macro X`}
+                                      className={`px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+                                        paramTags.includes('X')
+                                          ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-800 dark:text-cyan-200'
+                                          : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-cyan-700 dark:hover:text-cyan-300 hover:border-cyan-500/50'
+                                      }`}
+                                    >
+                                      +X
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => onQuickMapMacro(selectedNode.id, param.key, 'macroY')}
+                                      title={`Map ${param.label} to Macro Y`}
+                                      className={`px-1.5 py-0.5 text-[10px] font-mono rounded border transition-colors ${
+                                        paramTags.includes('Y')
+                                          ? 'bg-cyan-500/20 border-cyan-500/60 text-cyan-800 dark:text-cyan-200'
+                                          : 'bg-slate-50 dark:bg-[#0B0F17] border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-cyan-700 dark:hover:text-cyan-300 hover:border-cyan-500/50'
+                                      }`}
+                                    >
+                                      +Y
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <PrecisionSlider
+                              label={
+                                param.key === 'formantVowel'
+                                  ? `${param.label} (${getFormantVowelName(numVal)})`
+                                  : param.label
+                              }
+                              value={numVal}
+                              defaultValue={typeof param.defaultValue === 'number' ? param.defaultValue : undefined}
+                              min={min}
+                              max={max}
+                              step={step}
+                              integer={isInt}
+                              scale={param.scale || 'linear'}
+                              unit={param.unit}
+                              accent={isCyan ? 'cyan' : 'amber'}
+                              onDragStart={onDragStartHistory}
+                              onCommit={onCommitHistory}
+                              onChange={(val) => onUpdateNodeParam(selectedNode.id, param.key, val, false)}
+                            />
+                            {param.tooltip && (
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">{param.tooltip}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
@@ -588,12 +949,15 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
                         <PrecisionSlider
                           compact
                           value={conn.amount}
+                          defaultValue={isCv ? 0.25 : 1}
                           min={isCv ? -1 : 0}
                           max={isCv ? 1 : 1.5}
                           step={0.02}
                           fineStep={0.002}
                           accent={isCv ? 'cyan' : 'amber'}
-                          onChange={(val) => onUpdateConnectionAmount(conn.id, val)}
+                          onDragStart={onDragStartHistory}
+                          onCommit={onCommitHistory}
+                          onChange={(val) => onUpdateConnectionAmount(conn.id, val, false)}
                         />
                       </div>
                     );

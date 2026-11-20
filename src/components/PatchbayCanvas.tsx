@@ -9,6 +9,12 @@ import {
   Power,
   X,
   AudioLines,
+  Undo2,
+  Redo2,
+  Copy,
+  Trash2,
+  Keyboard,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
   ADDABLE_CATEGORY_ORDER,
@@ -26,24 +32,43 @@ import {
   getNodeHeight,
 } from '../engine/autoLayout';
 import { formatCarrierSummary, isAlternativeCarrierWaveform } from '../engine/carrierWaves';
+import { computePatchModulationSummary } from '../engine/modulationSummary';
 import { ModuleType, PortSpec, SynthConnection, SynthNode, SynthPatch } from '../engine/types';
 import { PrecisionSlider } from './PrecisionSlider';
 
 interface PatchbayCanvasProps {
   patch: SynthPatch;
   selectedNodeId: string | null;
+  selectedConnId: string | null;
   activeNotesCount: number;
   layoutMode: AutoLayoutMode;
+  canUndo: boolean;
+  canRedo: boolean;
+  undoCount: number;
+  redoCount: number;
+  fitTrigger?: number;
+  showOnboarding?: boolean;
+  shortcutsOpen?: boolean;
+  onToggleShortcuts?: () => void;
+  onDismissOnboarding?: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onChangeLayoutMode: (mode: AutoLayoutMode) => void;
   onSelectNode: (nodeId: string | null) => void;
+  onSelectConn: (connId: string | null) => void;
   onMoveNode: (nodeId: string, position: { x: number; y: number }) => void;
   onAddNode: (type: ModuleType, position: { x: number; y: number }) => void;
   onToggleBypass: (nodeId: string) => void;
+  onDuplicateNode: (nodeId: string) => void;
+  onDeleteNode: (nodeId: string) => void;
+  onInspectModulation?: (nodeId: string) => void;
   onAddConnection: (fromNode: string, fromPort: string, toNode: string, toPort: string) => void;
-  onUpdateConnectionAmount: (connId: string, amount: number) => void;
+  onUpdateConnectionAmount: (connId: string, amount: number, recordHistory?: boolean) => void;
   onDeleteConnection: (connId: string) => void;
   onAutoLayout: (mode?: AutoLayoutMode) => void;
   onOpenSampleAnalyzer?: () => void;
+  onDragStartHistory?: () => void;
+  onCommitHistory?: () => void;
   theme?: 'light' | 'dark';
 }
 
@@ -303,18 +328,36 @@ function buildCableRoute(
 export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
   patch,
   selectedNodeId,
+  selectedConnId,
   activeNotesCount,
   layoutMode,
+  canUndo,
+  canRedo,
+  undoCount,
+  redoCount,
+  fitTrigger = 0,
+  showOnboarding = false,
+  shortcutsOpen = false,
+  onToggleShortcuts,
+  onDismissOnboarding,
+  onUndo,
+  onRedo,
   onChangeLayoutMode,
   onSelectNode,
+  onSelectConn,
   onMoveNode,
   onAddNode,
   onToggleBypass,
+  onDuplicateNode,
+  onDeleteNode,
+  onInspectModulation,
   onAddConnection,
   onUpdateConnectionAmount,
   onDeleteConnection,
   onAutoLayout,
   onOpenSampleAnalyzer,
+  onDragStartHistory,
+  onCommitHistory,
   theme = 'light',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -322,15 +365,15 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
   const [zoom, setZoom] = useState(0.92);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [addMenuQuery, setAddMenuQuery] = useState('');
-  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [hoveredConnId, setHoveredConnId] = useState<string | null>(null);
   const pendingFitRef = useRef(false);
 
-  // Pending tap-to-connect or drag-to-connect source port
+  // Pending tap-to-connect or drag-to-connect source/target port (bidirectional)
   const [pendingWire, setPendingWire] = useState<{
-    fromNode: string;
-    fromPort: string;
+    originDir: 'in' | 'out';
+    originNode: string;
+    originPort: string;
     signal: 'audio' | 'cv';
     cursorX?: number;
     cursorY?: number;
@@ -343,6 +386,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     startY: number;
     origPosX: number;
     origPosY: number;
+    moved: boolean;
   } | null>(null);
 
   const panStateRef = useRef<{
@@ -354,6 +398,9 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
 
   useEffect(() => {
     const resetInteractions = () => {
+      if (dragNodeRef.current?.moved) {
+        onCommitHistory?.();
+      }
       dragNodeRef.current = null;
       panStateRef.current = null;
       setPendingWire((prev) =>
@@ -368,7 +415,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
       window.removeEventListener('pointercancel', resetInteractions);
       window.removeEventListener('blur', resetInteractions);
     };
-  }, []);
+  }, [onCommitHistory]);
 
   const clientToGraph = (clientX: number, clientY: number) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -417,6 +464,26 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     return () => window.cancelAnimationFrame(raf);
   }, [patch.nodes, handleFitView]);
 
+  useEffect(() => {
+    const raf = window.requestAnimationFrame(() => {
+      handleFitView();
+    });
+    return () => window.cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitTrigger]);
+
+  // Clear pending wire on Escape
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPendingWire(null);
+        setAddMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const triggerAutoLayout = (mode?: AutoLayoutMode) => {
     pendingFitRef.current = true;
     onAutoLayout(mode);
@@ -424,7 +491,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget && !(e.target as HTMLElement).dataset.canvasBg) return;
-    setSelectedConnId(null);
+    onSelectConn(null);
     onSelectNode(null);
     setPendingWire(null);
     setAddMenuOpen(false);
@@ -441,10 +508,12 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     if (dragNodeRef.current) {
       const dx = (e.clientX - dragNodeRef.current.startX) / zoom;
       const dy = (e.clientY - dragNodeRef.current.startY) / zoom;
-      onMoveNode(dragNodeRef.current.nodeId, {
-        x: Math.round((dragNodeRef.current.origPosX + dx) / 8) * 8,
-        y: Math.round((dragNodeRef.current.origPosY + dy) / 8) * 8,
-      });
+      const nextX = Math.round((dragNodeRef.current.origPosX + dx) / 8) * 8;
+      const nextY = Math.round((dragNodeRef.current.origPosY + dy) / 8) * 8;
+      if (nextX !== dragNodeRef.current.origPosX || nextY !== dragNodeRef.current.origPosY) {
+        dragNodeRef.current.moved = true;
+      }
+      onMoveNode(dragNodeRef.current.nodeId, { x: nextX, y: nextY });
       return;
     }
 
@@ -465,18 +534,26 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
   };
 
   const handleCanvasPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragNodeRef.current?.moved) {
+      onCommitHistory?.();
+    }
     dragNodeRef.current = null;
     panStateRef.current = null;
 
     if (pendingWire?.isDragging) {
       const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
-      const portEl = el?.closest('[data-port-dir="in"]') as HTMLElement | null;
+      const wantedDir = pendingWire.originDir === 'out' ? 'in' : 'out';
+      const portEl = el?.closest(`[data-port-dir="${wantedDir}"]`) as HTMLElement | null;
       if (portEl) {
-        const toNode = portEl.dataset.nodeId!;
-        const toPort = portEl.dataset.portId!;
-        const toSignal = portEl.dataset.portSignal as 'audio' | 'cv';
-        if (toNode !== pendingWire.fromNode && toSignal === pendingWire.signal) {
-          onAddConnection(pendingWire.fromNode, pendingWire.fromPort, toNode, toPort);
+        const targetNode = portEl.dataset.nodeId!;
+        const targetPort = portEl.dataset.portId!;
+        const targetSignal = portEl.dataset.portSignal as 'audio' | 'cv';
+        if (targetNode !== pendingWire.originNode && targetSignal === pendingWire.signal) {
+          if (pendingWire.originDir === 'out') {
+            onAddConnection(pendingWire.originNode, pendingWire.originPort, targetNode, targetPort);
+          } else {
+            onAddConnection(targetNode, targetPort, pendingWire.originNode, pendingWire.originPort);
+          }
           setPendingWire(null);
           return;
         }
@@ -499,26 +576,44 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
   ) => {
     e.stopPropagation();
 
-    if (port.direction === 'out') {
-      if (pendingWire && pendingWire.fromNode === node.id && pendingWire.fromPort === port.id) {
+    if (pendingWire) {
+      // Clicking the same origin port cancels
+      if (
+        pendingWire.originNode === node.id &&
+        pendingWire.originPort === port.id &&
+        pendingWire.originDir === port.direction
+      ) {
         setPendingWire(null);
         return;
       }
-      const pt = clientToGraph(e.clientX, e.clientY);
-      setPendingWire({
-        fromNode: node.id,
-        fromPort: port.id,
-        signal: port.signal,
-        cursorX: pt.x,
-        cursorY: pt.y,
-        isDragging: true,
-      });
-    } else if (port.direction === 'in' && pendingWire) {
-      if (pendingWire.fromNode !== node.id && pendingWire.signal === port.signal) {
-        onAddConnection(pendingWire.fromNode, pendingWire.fromPort, node.id, port.id);
+
+      // Clicking a compatible opposite-direction port completes the cable
+      if (
+        pendingWire.originDir !== port.direction &&
+        pendingWire.originNode !== node.id &&
+        pendingWire.signal === port.signal
+      ) {
+        if (pendingWire.originDir === 'out') {
+          onAddConnection(pendingWire.originNode, pendingWire.originPort, node.id, port.id);
+        } else {
+          onAddConnection(node.id, port.id, pendingWire.originNode, pendingWire.originPort);
+        }
         setPendingWire(null);
+        return;
       }
     }
+
+    // Start a new bidirectional pending wire from this port
+    const pt = clientToGraph(e.clientX, e.clientY);
+    setPendingWire({
+      originDir: port.direction,
+      originNode: node.id,
+      originPort: port.id,
+      signal: port.signal,
+      cursorX: pt.x,
+      cursorY: pt.y,
+      isDragging: true,
+    });
   };
 
   const selectedConn: SynthConnection | undefined = useMemo(
@@ -555,6 +650,8 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
     () => new Map<string, SynthNode>(patch.nodes.map((n) => [n.id, n])),
     [patch.nodes]
   );
+
+  const modSummaryMap = useMemo(() => computePatchModulationSummary(patch), [patch]);
 
   const selectedConnEndpoints = useMemo(() => {
     if (!selectedConn) return null;
@@ -766,6 +863,30 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
         <div className="flex items-center bg-white/95 dark:bg-[#111622]/95 border border-slate-300 dark:border-slate-800 rounded-md overflow-hidden shadow-xs dark:shadow-none">
           <button
             type="button"
+            onClick={onUndo}
+            disabled={!canUndo}
+            title={`Undo (Cmd/Ctrl+Z)${undoCount > 0 ? ` · ${undoCount} steps` : ''}`}
+            aria-label="Undo"
+            className="h-10 px-2.5 flex items-center justify-center gap-1 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+          </button>
+          <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 shrink-0" />
+          <button
+            type="button"
+            onClick={onRedo}
+            disabled={!canRedo}
+            title={`Redo (Cmd/Ctrl+Shift+Z)${redoCount > 0 ? ` · ${redoCount} steps` : ''}`}
+            aria-label="Redo"
+            className="h-10 px-2.5 flex items-center justify-center gap-1 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+          >
+            <Redo2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex items-center bg-white/95 dark:bg-[#111622]/95 border border-slate-300 dark:border-slate-800 rounded-md overflow-hidden shadow-xs dark:shadow-none">
+          <button
+            type="button"
             onClick={() => setZoom((z) => Math.max(0.4, z - 0.12))}
             title="Zoom Out"
             className="h-10 w-10 flex items-center justify-center text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -786,23 +907,117 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
           <button
             type="button"
             onClick={handleFitView}
-            title="Fit graph in view"
+            title="Fit graph in view (Shift+F)"
             className="h-10 w-10 flex items-center justify-center text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border-l border-slate-200 dark:border-slate-800"
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
+          {onToggleShortcuts && (
+            <>
+              <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 shrink-0" />
+              <button
+                type="button"
+                onClick={onToggleShortcuts}
+                title="Keyboard & Wiring Shortcuts (?)"
+                aria-label="Keyboard shortcuts"
+                className={`h-10 w-10 flex items-center justify-center transition-colors ${
+                  shortcutsOpen
+                    ? 'bg-cyan-500/15 text-cyan-800 dark:text-cyan-300'
+                    : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                <Keyboard className="w-3.5 h-3.5" />
+              </button>
+            </>
+          )}
         </div>
       </div>
+
+      {/* First-Run Onboarding Quick Start Strip */}
+      {showOnboarding && !pendingWire && !shortcutsOpen && (
+        <div className="absolute bottom-14 left-3 right-3 lg:left-auto lg:right-3 lg:max-w-xl z-20 px-3.5 py-2.5 bg-white/95 dark:bg-[#111622]/95 border border-cyan-600/40 dark:border-cyan-500/40 rounded-lg shadow-md flex items-center justify-between gap-3 text-xs">
+          <div className="text-slate-700 dark:text-slate-300 leading-snug">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">Quick Start: </span>
+            <span>1. Audition a preset on the left</span>
+            <span className="mx-1.5 text-slate-400">·</span>
+            <span>2. Play keys or sweep Macro XY below</span>
+            <span className="mx-1.5 text-slate-400">·</span>
+            <span>3. Click any module to tweak or drag ports to rewire</span>
+          </div>
+          {onDismissOnboarding && (
+            <button
+              type="button"
+              onClick={onDismissOnboarding}
+              title="Dismiss quick start"
+              aria-label="Dismiss quick start"
+              className="p-1.5 rounded text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Keyboard & Wiring Shortcuts Cheat-Sheet Popover */}
+      {shortcutsOpen && onToggleShortcuts && (
+        <div className="absolute top-15 right-3 z-30 w-80 bg-white dark:bg-[#111622] border border-slate-300 dark:border-slate-700 rounded-lg shadow-xl p-3.5 space-y-2.5 text-xs">
+          <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">
+              Studio Shortcuts &amp; Tips
+            </span>
+            <button
+              type="button"
+              onClick={onToggleShortcuts}
+              className="p-1 text-slate-500 hover:text-slate-900 dark:hover:text-slate-100"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="space-y-1.5 text-[11px]">
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Undo / Redo</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Cmd/Ctrl+Z · Shift+Z</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Delete Node / Cable</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Delete / Backspace</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Bypass Selected Node</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Shift + B</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Duplicate Selected Node</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Shift + D</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Fit Patch in View</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Shift + F</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Cancel Wire / Deselect</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Esc</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600 dark:text-slate-400">Fine Slider / Reset</span>
+              <span className="font-mono text-slate-900 dark:text-slate-200">Shift+Drag · Dbl-Click</span>
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-200 dark:border-slate-800 leading-snug">
+            Drag or tap from any output or input jack—compatible destination ports glow automatically.
+          </p>
+        </div>
+      )}
 
       {/* Tap-to-Connect Instruction Banner */}
       {pendingWire && !pendingWire.isDragging && (
         <div className="absolute top-16 left-3 z-20 px-3 py-2 bg-white dark:bg-[#111622] border border-cyan-600/50 dark:border-cyan-500/60 rounded-md flex items-center gap-3 text-xs text-slate-900 dark:text-slate-100 shadow-sm">
           <span>
-            Tap any{' '}
+            Tap any highlighted{' '}
             <span className={pendingWire.signal === 'audio' ? 'text-amber-700 dark:text-amber-400 font-semibold' : 'text-cyan-700 dark:text-cyan-400 font-semibold'}>
               {pendingWire.signal === 'audio' ? 'Amber Audio' : 'Cyan CV'}
             </span>{' '}
-            input port to wire cable
+            {pendingWire.originDir === 'out' ? 'input' : 'output'} port to wire cable
           </span>
           <button
             type="button"
@@ -826,19 +1041,22 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
             compact
             label="Cable Level"
             value={selectedConn.amount}
+            defaultValue={selectedConn.fromPort === 'cv' ? 0.25 : 1}
             min={selectedConn.fromPort === 'cv' ? -1 : 0}
             max={selectedConn.fromPort === 'cv' ? 1 : 1.5}
             step={0.02}
             fineStep={0.002}
             accent={selectedConn.fromPort === 'cv' ? 'cyan' : 'amber'}
-            onChange={(val) => onUpdateConnectionAmount(selectedConn.id, val)}
+            onDragStart={onDragStartHistory}
+            onCommit={onCommitHistory}
+            onChange={(val) => onUpdateConnectionAmount(selectedConn.id, val, false)}
             className="w-48"
           />
           <button
             type="button"
             onClick={() => {
               onDeleteConnection(selectedConn.id);
-              setSelectedConnId(null);
+              onSelectConn(null);
             }}
             className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-500/15 text-rose-700 dark:text-rose-400 hover:bg-rose-500/25 font-medium whitespace-nowrap"
           >
@@ -923,7 +1141,7 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                 onPointerLeave={() => setHoveredConnId((prev) => (prev === conn.id ? null : prev))}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setSelectedConnId(conn.id);
+                  onSelectConn(conn.id);
                 }}
                 className="cursor-pointer"
               >
@@ -990,10 +1208,13 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
           })}
 
           {pendingWire && pendingWire.cursorX !== undefined && pendingWire.cursorY !== undefined && (() => {
-            const srcNode = nodeById.get(pendingWire.fromNode);
-            if (!srcNode) return null;
-            const start = getPortCenter(srcNode, pendingWire.fromPort, 'out');
-            const d = buildPendingBezier(start.x, start.y, pendingWire.cursorX, pendingWire.cursorY);
+            const originNode = nodeById.get(pendingWire.originNode);
+            if (!originNode) return null;
+            const anchor = getPortCenter(originNode, pendingWire.originPort, pendingWire.originDir);
+            const d =
+              pendingWire.originDir === 'out'
+                ? buildPendingBezier(anchor.x, anchor.y, pendingWire.cursorX, pendingWire.cursorY)
+                : buildPendingBezier(pendingWire.cursorX, pendingWire.cursorY, anchor.x, anchor.y);
             return (
               <path
                 d={d}
@@ -1094,6 +1315,17 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
               ? 'text-emerald-800 dark:text-emerald-200'
               : 'text-amber-800 dark:text-amber-200';
 
+          const nodeMod = modSummaryMap.get(node.id);
+          const modLabels: string[] = [];
+          if (nodeMod) {
+            if (nodeMod.hasMacroX && nodeMod.hasMacroY) modLabels.push('XY');
+            else if (nodeMod.hasMacroX) modLabels.push('X');
+            else if (nodeMod.hasMacroY) modLabels.push('Y');
+            if (nodeMod.hasVelocity) modLabels.push('VEL');
+            if (nodeMod.hasModWheel) modLabels.push('CC1');
+            if (nodeMod.modSlotCount > 0) modLabels.push(`M${nodeMod.modSlotCount}`);
+          }
+
           return (
             <div
               key={node.id}
@@ -1108,23 +1340,78 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
               onPointerDown={(e) => {
                 e.stopPropagation();
                 onSelectNode(node.id);
-                setSelectedConnId(null);
+                onSelectConn(null);
               }}
               className={`absolute pointer-events-auto rounded-lg border transition-all duration-100 ${cardSurfaceClass} ${
                 node.bypassed ? 'opacity-50' : isUnrelatedDuringFocus ? 'opacity-70' : ''
               } ${cardBorderClass}`}
             >
+              {/* Floating Micro-Action Bar above Selected Non-Output Node */}
+              {isSelected && !pendingWire && (
+                <div
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className="absolute -top-8 left-0 flex items-center gap-1 bg-white dark:bg-[#111622] border border-slate-300 dark:border-slate-700 rounded-md px-1.5 py-0.5 shadow-md z-30"
+                >
+                  {node.type !== 'output' && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onToggleBypass(node.id)}
+                        title={node.bypassed ? 'Enable module (Shift+B)' : 'Bypass module (Shift+B)'}
+                        className={`p-1 rounded text-[11px] flex items-center gap-1 transition-colors ${
+                          node.bypassed
+                            ? 'text-slate-500 hover:text-slate-900 dark:hover:text-slate-100'
+                            : 'text-amber-700 dark:text-amber-400 hover:bg-amber-500/10'
+                        }`}
+                      >
+                        <Power className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDuplicateNode(node.id)}
+                        title="Duplicate module (Shift+D)"
+                        className="p-1 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                      >
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    </>
+                  )}
+                  {onInspectModulation && (
+                    <button
+                      type="button"
+                      onClick={() => onInspectModulation(node.id)}
+                      title="Open Mod Matrix routes for this module"
+                      className="p-1 rounded text-cyan-700 dark:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                    >
+                      <SlidersHorizontal className="w-3 h-3" />
+                    </button>
+                  )}
+                  {node.type !== 'output' && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteNode(node.id)}
+                      title="Delete module (Delete)"
+                      className="p-1 rounded text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* Drag Handle Header (36px) */}
               <div
                 onPointerDown={(e) => {
                   e.stopPropagation();
                   onSelectNode(node.id);
+                  onDragStartHistory?.();
                   dragNodeRef.current = {
                     nodeId: node.id,
                     startX: e.clientX,
                     startY: e.clientY,
                     origPosX: node.position.x,
                     origPosY: node.position.y,
+                    moved: false,
                   };
                 }}
                 className={`h-[36px] px-3 border-b rounded-t-lg flex items-center justify-between gap-2 cursor-grab active:cursor-grabbing ${headerBgClass}`}
@@ -1159,11 +1446,25 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                 </div>
               </div>
 
-              {/* Compact Summary Readout (28px) */}
-              <div className={`h-[28px] px-3 flex items-center border-b ${summaryBgClass}`}>
-                <span className="text-[11px] font-mono text-slate-700 dark:text-slate-300 truncate">
+              {/* Compact Summary Readout (28px) + Modulation Badges */}
+              <div className={`h-[28px] px-3 flex items-center justify-between gap-1.5 border-b ${summaryBgClass}`}>
+                <span className="text-[11px] font-mono text-slate-700 dark:text-slate-300 truncate min-w-0">
                   {getNodeSummary(node)}
                 </span>
+                {modLabels.length > 0 && (
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => {
+                      onSelectNode(node.id);
+                      onInspectModulation?.(node.id);
+                    }}
+                    title={`Active modulation routes (${modLabels.join(' · ')}) — click to inspect`}
+                    className="text-[9.5px] font-mono font-semibold text-cyan-800 dark:text-cyan-300 bg-cyan-500/12 border border-cyan-600/35 dark:border-cyan-500/40 px-1.5 py-0.5 rounded shrink-0 hover:bg-cyan-500/20 transition-colors"
+                  >
+                    {modLabels.slice(0, 2).join('·')}
+                  </button>
+                )}
               </div>
 
               {/* Ports Grid */}
@@ -1178,9 +1479,22 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                     Boolean(
                       p &&
                         pendingWire &&
-                        pendingWire.fromNode !== node.id &&
+                        pendingWire.originDir !== p.direction &&
+                        pendingWire.originNode !== node.id &&
                         pendingWire.signal === p.signal
                     );
+
+                  const isOriginPort = (p?: PortSpec) =>
+                    Boolean(
+                      p &&
+                        pendingWire &&
+                        pendingWire.originDir === p.direction &&
+                        pendingWire.originNode === node.id &&
+                        pendingWire.originPort === p.id
+                    );
+
+                  const isIncompatibleDuringWire = (p?: PortSpec) =>
+                    Boolean(p && pendingWire && !canAcceptPending(p) && !isOriginPort(p));
 
                   return (
                     <div
@@ -1189,7 +1503,11 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                     >
                       {/* Input Port */}
                       {inPort ? (
-                        <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className={`flex items-center gap-2 min-w-0 transition-opacity ${
+                            isIncompatibleDuringWire(inPort) ? 'opacity-35' : ''
+                          }`}
+                        >
                           <button
                             type="button"
                             data-port-dir="in"
@@ -1207,8 +1525,12 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                                   : 'bg-white dark:bg-[#0B0F17] border-cyan-600 dark:border-cyan-400 group-hover:scale-125'
                               } ${
                                 canAcceptPending(inPort)
-                                  ? 'ring-4 ring-cyan-500/35 scale-125'
-                                  : ''
+                                  ? inPort.signal === 'audio'
+                                    ? 'ring-4 ring-amber-500/45 scale-125'
+                                    : 'ring-4 ring-cyan-500/45 scale-125'
+                                  : isOriginPort(inPort)
+                                    ? 'ring-4 ring-amber-500/45 scale-125'
+                                    : ''
                               }`}
                             >
                               {inWired && (
@@ -1224,9 +1546,11 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                           </button>
                           <span
                             className={`text-[11px] whitespace-nowrap pl-1 ${
-                              inWired
-                                ? 'text-slate-900 dark:text-slate-100 font-medium'
-                                : 'text-slate-600 dark:text-slate-400'
+                              canAcceptPending(inPort)
+                                ? 'text-slate-900 dark:text-white font-semibold'
+                                : inWired
+                                  ? 'text-slate-900 dark:text-slate-100 font-medium'
+                                  : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
                             {inPort.label}
@@ -1238,12 +1562,18 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
 
                       {/* Output Port */}
                       {outPort ? (
-                        <div className="flex items-center gap-2 shrink-0 ml-auto">
+                        <div
+                          className={`flex items-center gap-2 shrink-0 ml-auto transition-opacity ${
+                            isIncompatibleDuringWire(outPort) ? 'opacity-35' : ''
+                          }`}
+                        >
                           <span
                             className={`text-[11px] whitespace-nowrap pr-1 text-right ${
-                              outWired
-                                ? 'text-slate-900 dark:text-slate-100 font-medium'
-                                : 'text-slate-600 dark:text-slate-400'
+                              canAcceptPending(outPort)
+                                ? 'text-slate-900 dark:text-white font-semibold'
+                                : outWired
+                                  ? 'text-slate-900 dark:text-slate-100 font-medium'
+                                  : 'text-slate-600 dark:text-slate-400'
                             }`}
                           >
                             {outPort.label}
@@ -1268,10 +1598,13 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                                     ? 'bg-cyan-600 dark:bg-cyan-400 border-white dark:border-[#07090E] group-hover:scale-125'
                                     : 'bg-cyan-500/45 border-cyan-600/80 dark:border-cyan-400/70 group-hover:scale-125'
                               } ${
-                                pendingWire?.fromNode === node.id &&
-                                pendingWire?.fromPort === outPort.id
-                                  ? 'ring-4 ring-amber-500/40 scale-125'
-                                  : ''
+                                canAcceptPending(outPort)
+                                  ? outPort.signal === 'audio'
+                                    ? 'ring-4 ring-amber-500/45 scale-125'
+                                    : 'ring-4 ring-cyan-500/45 scale-125'
+                                  : isOriginPort(outPort)
+                                    ? 'ring-4 ring-amber-500/45 scale-125'
+                                    : ''
                               }`}
                             />
                           </button>

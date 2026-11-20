@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Gauge, Lock, Unlock, Pin, VolumeX } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Gauge, Lock, Unlock, Pin, VolumeX, X } from 'lucide-react';
+import { MUSICAL_SCALES } from '../engine/modulationSummary';
 import { SynthEngine } from '../engine/SynthEngine';
 import { LatencyMetrics } from '../engine/types';
 import { PrecisionSlider } from './PrecisionSlider';
@@ -7,6 +8,7 @@ import { PrecisionSlider } from './PrecisionSlider';
 interface PlayableKeyboardProps {
   engine: SynthEngine;
   activeNotes: number[];
+  compactDock?: boolean;
 }
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -21,7 +23,11 @@ const KEYBOARD_LABELS: Record<number, string> = {
   12: 'Q', 13: '2', 14: 'W', 15: '3', 16: 'E', 17: 'R', 18: '5', 19: 'T', 20: '6', 21: 'Y', 22: '7', 23: 'U', 24: 'I',
 };
 
-export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, activeNotes }) => {
+export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({
+  engine,
+  activeNotes,
+  compactDock = false,
+}) => {
   const [baseOctave, setBaseOctave] = useState(3); // C3 = MIDI 48
   const [sustain, setSustain] = useState(false);
   const [latchEnabled, setLatchEnabled] = useState(false);
@@ -31,6 +37,15 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
   const [modWheel, setModWheel] = useState(0.15);
   const [latency, setLatency] = useState<LatencyMetrics>(() => engine.getLatencyMetrics());
   const [latencyOpen, setLatencyOpen] = useState(false);
+  const [scaleId, setScaleId] = useState<string>('chromatic');
+  const [scaleLock, setScaleLock] = useState(false);
+
+  const activeScale = useMemo(
+    () => MUSICAL_SCALES.find((s) => s.id === scaleId) ?? MUSICAL_SCALES[0],
+    [scaleId]
+  );
+  const isNoteInScale = (midi: number) =>
+    scaleId === 'chromatic' || activeScale.intervals.includes(((midi % 12) + 12) % 12);
 
   useEffect(() => {
     engine.setModWheel(0.15);
@@ -84,6 +99,7 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
         return;
@@ -91,6 +107,9 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
       const key = e.key.toLowerCase();
       if (key in QWERTY_MAP) {
         const midi = startMidi + QWERTY_MAP[key];
+        if (scaleLock && !activeScale.intervals.includes(((midi % 12) + 12) % 12)) {
+          return;
+        }
         heldQwertyRef.current.set(key, midi);
         void engine.noteOn(midi, velocity, e.timeStamp, 'keyboard');
       }
@@ -111,11 +130,12 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [engine, startMidi, velocity]);
+  }, [engine, startMidi, velocity, scaleLock, activeScale]);
 
   const handleKeyPointerDown = (e: React.PointerEvent<HTMLButtonElement>, midi: number) => {
     e.stopPropagation();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
+    if (scaleLock && !isNoteInScale(midi)) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const relY = Math.max(0.25, Math.min(1, (e.clientY - rect.top) / rect.height));
     const dynVel = Math.round(velocity * (0.65 + relY * 0.35));
@@ -125,6 +145,7 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
 
   const handleKeyPointerEnter = (e: React.PointerEvent<HTMLButtonElement>, midi: number) => {
     if (e.buttons === 0 && !activePointersRef.current.has(e.pointerId)) return;
+    if (scaleLock && !isNoteInScale(midi)) return;
     const prevMidi = activePointersRef.current.get(e.pointerId);
     if (prevMidi !== undefined && prevMidi !== midi) {
       engine.noteOff(prevMidi);
@@ -213,28 +234,80 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
             <span>Sustain</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              const next = !latchEnabled;
-              setLatchEnabled(next);
-              engine.setLatchEnabled(next);
-            }}
-            title="Hold Latch: tap keys to drone chords hands-free; tap again to unlatch"
-            className={`inline-flex items-center gap-1.5 h-8 px-2.5 text-[11px] font-medium rounded border transition-colors whitespace-nowrap ${
-              latchEnabled
-                ? 'bg-amber-500/15 border-amber-600/50 dark:border-amber-500/50 text-amber-800 dark:text-amber-300'
-                : 'bg-slate-50 dark:bg-[#07090E] border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            <Pin className="w-3 h-3" />
-            <span>Hold Latch</span>
+          <div className="flex items-center">
+            <button
+              type="button"
+              onClick={() => {
+                const next = !latchEnabled;
+                setLatchEnabled(next);
+                engine.setLatchEnabled(next);
+              }}
+              title="Hold Latch: tap keys to drone chords hands-free; tap again to unlatch"
+              className={`inline-flex items-center gap-1.5 h-8 px-2.5 text-[11px] font-medium border transition-colors whitespace-nowrap ${
+                latchedNotes.length > 0 ? 'rounded-l' : 'rounded'
+              } ${
+                latchEnabled
+                  ? 'bg-amber-500/15 border-amber-600/50 dark:border-amber-500/50 text-amber-800 dark:text-amber-300'
+                  : 'bg-slate-50 dark:bg-[#07090E] border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <Pin className="w-3 h-3" />
+              <span>Hold Latch</span>
+              {latchedNotes.length > 0 && (
+                <span className="font-mono tabular-nums text-[10px] text-amber-900 dark:text-amber-200">
+                  · {latchedNotes.length}
+                </span>
+              )}
+            </button>
             {latchedNotes.length > 0 && (
-              <span className="font-mono tabular-nums text-[10px] text-amber-900 dark:text-amber-200">
-                · {latchedNotes.length}
-              </span>
+              <button
+                type="button"
+                onClick={() => engine.allNotesOff()}
+                title="Clear all latched drone notes"
+                aria-label="Clear latched notes"
+                className="h-8 px-1.5 rounded-r border-y border-r border-amber-600/50 dark:border-amber-500/50 bg-amber-500/20 text-amber-900 dark:text-amber-200 hover:bg-rose-500/20 hover:text-rose-700 dark:hover:text-rose-300 flex items-center justify-center transition-colors"
+              >
+                <X className="w-3 h-3" />
+              </button>
             )}
-          </button>
+          </div>
+
+          {/* Musical Scale Guide & Lock */}
+          <div className="flex items-center">
+            <select
+              value={scaleId}
+              onChange={(e) => {
+                const nextScale = e.target.value;
+                setScaleId(nextScale);
+                if (nextScale === 'chromatic') setScaleLock(false);
+              }}
+              aria-label="Keyboard Scale Guide"
+              title="Highlight musical scale notes on the keyboard"
+              className={`h-8 px-2 text-[11px] bg-slate-50 dark:bg-[#07090E] border border-slate-300 dark:border-slate-800 text-slate-700 dark:text-slate-200 focus:outline-none focus:border-cyan-500 ${
+                scaleId !== 'chromatic' ? 'rounded-l' : 'rounded'
+              }`}
+            >
+              {MUSICAL_SCALES.map((sc) => (
+                <option key={sc.id} value={sc.id}>
+                  Scale: {sc.label}
+                </option>
+              ))}
+            </select>
+            {scaleId !== 'chromatic' && (
+              <button
+                type="button"
+                onClick={() => setScaleLock((v) => !v)}
+                title={scaleLock ? 'Scale Lock ON: out-of-scale keys muted' : 'Scale Lock OFF: visual guide only'}
+                className={`h-8 px-2 text-[11px] font-medium rounded-r border-y border-r transition-colors whitespace-nowrap ${
+                  scaleLock
+                    ? 'bg-cyan-500/15 border-cyan-600/50 dark:border-cyan-500/50 text-cyan-800 dark:text-cyan-300'
+                    : 'bg-slate-50 dark:bg-[#07090E] border-slate-300 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                {scaleLock ? 'Locked' : 'Guide'}
+              </button>
+            )}
+          </div>
 
           <button
             type="button"
@@ -410,10 +483,17 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
 
       {/* Piano Keys Surface (Horizontally scrollable on narrow phones so touch keys stay >= 44px) */}
       <div className="overflow-x-auto touch-pan-x">
-        <div className="relative h-28 sm:h-32 min-w-[660px] w-full select-none touch-none flex">
+        <div
+          className={`relative ${
+            compactDock ? 'h-24 sm:h-[104px]' : 'h-28 sm:h-32'
+          } min-w-[660px] w-full select-none touch-none flex`}
+        >
           {whiteKeys.map((wk) => {
             const isLatched = latchedNotes.includes(wk.midi);
             const isActive = activeNotes.includes(wk.midi) || isLatched;
+            const inScale = isNoteInScale(wk.midi);
+            const isRoot = scaleId !== 'chromatic' && wk.midi % 12 === 0;
+            const mutedByScale = scaleId !== 'chromatic' && !inScale;
             return (
               <button
                 key={wk.midi}
@@ -421,14 +501,29 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
                 onPointerDown={(e) => handleKeyPointerDown(e, wk.midi)}
                 onPointerEnter={(e) => handleKeyPointerEnter(e, wk.midi)}
                 onPointerUp={handleKeyPointerUp}
-                className={`relative flex-1 h-full border-r border-slate-300 dark:border-slate-800 last:border-r-0 flex flex-col justify-end items-center pb-2 transition-colors duration-75 ${
+                className={`relative flex-1 h-full border-r border-slate-300 dark:border-slate-800 last:border-r-0 flex flex-col justify-end items-center pb-1.5 transition-colors duration-75 ${
                   isLatched
                     ? 'bg-cyan-100 dark:bg-cyan-500/20 text-cyan-900 dark:text-cyan-200'
                     : isActive
                       ? 'bg-amber-100 dark:bg-amber-500/25 text-amber-900 dark:text-amber-200'
-                      : 'bg-white dark:bg-[#171E2E] hover:bg-slate-50 dark:hover:bg-[#1E263A] text-slate-500 dark:text-slate-400'
+                      : mutedByScale
+                        ? scaleLock
+                          ? 'bg-slate-200/75 dark:bg-[#0E131E] text-slate-400/60 dark:text-slate-600 cursor-not-allowed'
+                          : 'bg-slate-100/90 dark:bg-[#121725] text-slate-400 dark:text-slate-500 hover:bg-slate-50 dark:hover:bg-[#192033]'
+                        : isRoot
+                          ? 'bg-cyan-50/60 dark:bg-[#172234] hover:bg-cyan-50 dark:hover:bg-[#1D2B42] text-cyan-800 dark:text-cyan-300'
+                          : 'bg-white dark:bg-[#171E2E] hover:bg-slate-50 dark:hover:bg-[#1E263A] text-slate-500 dark:text-slate-400'
                 }`}
               >
+                {scaleId !== 'chromatic' && inScale && (
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full mb-1 ${
+                      isRoot
+                        ? 'bg-cyan-600 dark:bg-cyan-400'
+                        : 'bg-amber-500/60 dark:bg-amber-400/50'
+                    }`}
+                  />
+                )}
                 {wk.qwerty && (
                   <span className="text-[10px] font-mono text-slate-400 dark:text-slate-500 hidden md:block">
                     {wk.qwerty}
@@ -442,6 +537,8 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
           {blackKeys.map((bk) => {
             const isLatched = latchedNotes.includes(bk.midi);
             const isActive = activeNotes.includes(bk.midi) || isLatched;
+            const inScale = isNoteInScale(bk.midi);
+            const mutedByScale = scaleId !== 'chromatic' && !inScale;
             const widthPercent = (0.64 / totalWhiteKeys) * 100;
             return (
               <button
@@ -456,9 +553,16 @@ export const PlayableKeyboard: React.FC<PlayableKeyboardProps> = ({ engine, acti
                     ? 'bg-cyan-500 dark:bg-cyan-400 text-white dark:text-slate-950'
                     : isActive
                       ? 'bg-amber-500 text-slate-950'
-                      : 'bg-slate-800 dark:bg-[#07090E] hover:bg-slate-700 dark:hover:bg-[#0F1522] text-slate-300 dark:text-slate-400'
+                      : mutedByScale
+                        ? scaleLock
+                          ? 'bg-slate-400/70 dark:bg-[#0D111A] text-slate-500/50 dark:text-slate-600 cursor-not-allowed'
+                          : 'bg-slate-600 dark:bg-[#0B0F17] text-slate-400 dark:text-slate-500 hover:bg-slate-500 dark:hover:bg-[#111726]'
+                        : 'bg-slate-800 dark:bg-[#07090E] hover:bg-slate-700 dark:hover:bg-[#0F1522] text-slate-300 dark:text-slate-400'
                 }`}
               >
+                {scaleId !== 'chromatic' && inScale && (
+                  <span className="w-1 h-1 rounded-full bg-amber-400 mb-0.5" />
+                )}
                 {bk.qwerty && (
                   <span className="text-[9px] font-mono hidden md:block">{bk.qwerty}</span>
                 )}

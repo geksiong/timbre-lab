@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { SlidersHorizontal, Piano, PanelLeft, PanelRight, PanelLeftOpen, PanelRightOpen, ChevronDown, ChevronUp, Square, Sun, Moon } from 'lucide-react';
+import {
+  SlidersHorizontal,
+  Piano,
+  PanelLeft,
+  PanelRight,
+  PanelLeftOpen,
+  PanelRightOpen,
+  Square,
+  Play,
+  Sun,
+  Moon,
+  RotateCcw,
+  VolumeX,
+} from 'lucide-react';
 import { ETHNIC_PRESETS } from './data/ethnicPresets';
 import { AMBIENT_PRESETS } from './data/ambientPresets';
 import { GM_PRESETS } from './data/gmPresets';
@@ -7,6 +20,7 @@ import { TEST_TUNES } from './data/testTunes';
 import { MidiController, MidiControllerState } from './engine/MidiController';
 import { AutoLayoutMode, computeAutoLayout } from './engine/autoLayout';
 import { createDefaultNode, MODULE_REGISTRY } from './engine/moduleRegistry';
+import { arePatchesEquivalent } from './engine/modulationSummary';
 import { SynthEngine } from './engine/SynthEngine';
 import { TunePlaybackState, TunePlayer } from './engine/TunePlayer';
 import {
@@ -35,6 +49,12 @@ import { WaveformScopes } from './components/WaveformScopes';
 
 const SAVED_STORAGE_KEY = 'timbre_lab_custom_presets_v1';
 const THEME_STORAGE_KEY = 'timbre_lab_theme';
+const DOCK_TAB_STORAGE_KEY = 'timbre_lab_dock_tab_v1';
+const FAVORITES_STORAGE_KEY = 'timbre_lab_favorites_v1';
+const SHOW_ALL_PARAMS_STORAGE_KEY = 'timbre_lab_show_all_params_v1';
+const ONBOARDING_DISMISSED_KEY = 'timbre_lab_onboarding_dismissed_v1';
+
+type DockTab = 'keysXy' | 'scopesTransport' | 'split' | 'collapsed';
 
 function clonePatch(p: SynthPatch): SynthPatch {
   return JSON.parse(JSON.stringify(p)) as SynthPatch;
@@ -207,6 +227,19 @@ export default function App() {
   const midiController = midiControllerRef.current;
 
   const [patch, setPatch] = useState<SynthPatch>(() => clonePatch(ETHNIC_PRESETS[0]));
+  const [baselinePatch, setBaselinePatch] = useState<SynthPatch>(() =>
+    clonePatch(ETHNIC_PRESETS[0])
+  );
+  const [history, setHistory] = useState<{ past: SynthPatch[]; future: SynthPatch[] }>({
+    past: [],
+    future: [],
+  });
+  const patchRef = useRef<SynthPatch>(patch);
+  patchRef.current = patch;
+  const historyRef = useRef(history);
+  historyRef.current = history;
+  const gestureSnapshotRef = useRef<SynthPatch | null>(null);
+
   const [savedPresets, setSavedPresets] = useState<SynthPatch[]>(() => {
     try {
       const raw = localStorage.getItem(SAVED_STORAGE_KEY);
@@ -221,17 +254,64 @@ export default function App() {
     }
   });
 
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
     () => ETHNIC_PRESETS[0].nodes[0]?.id || null
   );
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
+  const [focusedModNodeId, setFocusedModNodeId] = useState<string | null>(null);
   const [activeNotes, setActiveNotes] = useState<number[]>([]);
   const [activeView, setActiveView] = useState<StudioView>('patchbay');
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(true);
   const [rightInspectorOpen, setRightInspectorOpen] = useState(true);
   const [mobileTab, setMobileTab] = useState<MobileTab>('patchbay');
   const [mobileKeysOpen, setMobileKeysOpen] = useState(true);
-  const [telemetryRowOpen, setTelemetryRowOpen] = useState(true);
-  const [keyboardRowOpen, setKeyboardRowOpen] = useState(true);
+  const [dockTab, setDockTab] = useState<DockTab>(() => {
+    try {
+      const saved = localStorage.getItem(DOCK_TAB_STORAGE_KEY);
+      if (
+        saved === 'keysXy' ||
+        saved === 'scopesTransport' ||
+        saved === 'split' ||
+        saved === 'collapsed'
+      ) {
+        return saved;
+      }
+      return 'keysXy';
+    } catch {
+      return 'keysXy';
+    }
+  });
+  const [showAllParams, setShowAllParams] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SHOW_ALL_PARAMS_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ONBOARDING_DISMISSED_KEY) !== '1';
+    } catch {
+      return true;
+    }
+  });
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [fitTrigger, setFitTrigger] = useState(0);
+  const [auditioningPresetId, setAuditioningPresetId] = useState<string | null>(null);
+
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
       return localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light';
@@ -256,6 +336,10 @@ export default function App() {
   const allBuiltInPresets = useMemo(
     () => [...ETHNIC_PRESETS, ...AMBIENT_PRESETS, ...GM_PRESETS],
     []
+  );
+  const isDirty = useMemo(
+    () => !arePatchesEquivalent(patch, baselinePatch),
+    [patch, baselinePatch]
   );
 
   const noticeTimerRef = useRef<number | null>(null);
@@ -283,6 +367,31 @@ export default function App() {
   useEffect(() => {
     engine.loadPatch(patch);
   }, [engine, patch]);
+
+  // Persist dock, favorites, and disclosure preferences
+  useEffect(() => {
+    try {
+      localStorage.setItem(DOCK_TAB_STORAGE_KEY, dockTab);
+    } catch {
+      // ignore storage errors
+    }
+  }, [dockTab]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favoriteIds));
+    } catch {
+      // ignore storage errors
+    }
+  }, [favoriteIds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SHOW_ALL_PARAMS_STORAGE_KEY, showAllParams ? '1' : '0');
+    } catch {
+      // ignore storage errors
+    }
+  }, [showAllParams]);
 
   // Sync light/dark class on <html> and persist preference
   useEffect(() => {
@@ -388,8 +497,14 @@ export default function App() {
       const target = GM_PRESETS[program];
       if (target) {
         const next = clonePatch(target);
+        patchRef.current = next;
         setPatch(next);
+        setBaselinePatch(clonePatch(next));
+        const emptyH = { past: [], future: [] };
+        historyRef.current = emptyH;
+        setHistory(emptyH);
         setSelectedNodeId(next.nodes[0]?.id || null);
+        setSelectedConnId(null);
         showNotice(`MIDI Program Change: ${target.name}`);
       }
     });
@@ -418,14 +533,112 @@ export default function App() {
     }
   }, [savedPresets]);
 
+  const pushHistorySnapshot = useCallback((snapshot: SynthPatch) => {
+    const cloned = clonePatch(snapshot);
+    const nextHistory = {
+      past: [...historyRef.current.past.slice(-49), cloned],
+      future: [],
+    };
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
+  }, []);
+
+  const applyTrackedMutation = useCallback(
+    (mutator: (prev: SynthPatch) => SynthPatch | null, recordHistory = true) => {
+      const current = patchRef.current;
+      const next = mutator(current);
+      if (!next) return;
+      if (recordHistory && !arePatchesEquivalent(current, next)) {
+        pushHistorySnapshot(current);
+      }
+      patchRef.current = next;
+      setPatch(next);
+    },
+    [pushHistorySnapshot]
+  );
+
+  const handleStartGestureHistory = useCallback(() => {
+    if (!gestureSnapshotRef.current) {
+      gestureSnapshotRef.current = clonePatch(patchRef.current);
+    }
+  }, []);
+
+  const handleCommitGestureHistory = useCallback(() => {
+    const start = gestureSnapshotRef.current;
+    gestureSnapshotRef.current = null;
+    if (!start) return;
+    if (!arePatchesEquivalent(start, patchRef.current)) {
+      pushHistorySnapshot(start);
+    }
+  }, [pushHistorySnapshot]);
+
+  const handleUndo = useCallback(() => {
+    gestureSnapshotRef.current = null;
+    const h = historyRef.current;
+    if (h.past.length === 0) return;
+    const previous = clonePatch(h.past[h.past.length - 1]);
+    const currentClone = clonePatch(patchRef.current);
+    const nextHistory = {
+      past: h.past.slice(0, -1),
+      future: [currentClone, ...h.future.slice(0, 49)],
+    };
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
+    patchRef.current = previous;
+    setPatch(previous);
+    engine.loadPatch(previous);
+    setSelectedNodeId((cur) =>
+      cur && previous.nodes.some((n) => n.id === cur) ? cur : previous.nodes[0]?.id || null
+    );
+    setSelectedConnId((cur) =>
+      cur && previous.connections.some((c) => c.id === cur) ? cur : null
+    );
+    showNotice('Undid edit');
+  }, [engine, showNotice]);
+
+  const handleRedo = useCallback(() => {
+    gestureSnapshotRef.current = null;
+    const h = historyRef.current;
+    if (h.future.length === 0) return;
+    const nextPatch = clonePatch(h.future[0]);
+    const currentClone = clonePatch(patchRef.current);
+    const nextHistory = {
+      past: [...h.past.slice(-49), currentClone],
+      future: h.future.slice(1),
+    };
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
+    patchRef.current = nextPatch;
+    setPatch(nextPatch);
+    engine.loadPatch(nextPatch);
+    setSelectedNodeId((cur) =>
+      cur && nextPatch.nodes.some((n) => n.id === cur) ? cur : nextPatch.nodes[0]?.id || null
+    );
+    setSelectedConnId((cur) =>
+      cur && nextPatch.connections.some((c) => c.id === cur) ? cur : null
+    );
+    showNotice('Redid edit');
+  }, [engine, showNotice]);
+
   const applyPatchSelection = useCallback(
-    (cloned: SynthPatch) => {
+    (cloned: SynthPatch, resetBaseline = true) => {
+      gestureSnapshotRef.current = null;
       const nextXY = cloned.macroDefaults ?? { x: 0.5, y: 0.5 };
       engine.setMacroXY(nextXY.x, nextXY.y);
       setMacroXY(nextXY);
       engine.loadPatch(cloned);
+      patchRef.current = cloned;
       setPatch(cloned);
+      if (resetBaseline) {
+        setBaselinePatch(clonePatch(cloned));
+        const emptyH = { past: [], future: [] };
+        historyRef.current = emptyH;
+        setHistory(emptyH);
+      }
       setSelectedNodeId(cloned.nodes[0]?.id || null);
+      setSelectedConnId(null);
+      setFocusedModNodeId(null);
+      setFitTrigger((v) => v + 1);
     },
     [engine]
   );
@@ -440,57 +653,103 @@ export default function App() {
 
   const handleSelectPatch = useCallback(
     (nextPatch: SynthPatch) => {
+      clearAuditionTimers();
+      setAuditioningPresetId(null);
       const cloned = clonePatch(nextPatch);
-      applyPatchSelection(cloned);
+      applyPatchSelection(cloned, true);
       if (window.innerWidth < 1024) {
         setMobileTab('patchbay');
       }
     },
-    [applyPatchSelection]
+    [applyPatchSelection, clearAuditionTimers]
   );
 
-  const handleMoveNode = useCallback((nodeId: string, position: { x: number; y: number }) => {
-    setPatch((prev) => ({
-      ...prev,
-      nodes: prev.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
-    }));
+  const handleRevertPatch = useCallback(() => {
+    const reverted = clonePatch(baselinePatch);
+    if (arePatchesEquivalent(patchRef.current, reverted)) return;
+    pushHistorySnapshot(patchRef.current);
+    const nextXY = reverted.macroDefaults ?? { x: 0.5, y: 0.5 };
+    engine.setMacroXY(nextXY.x, nextXY.y);
+    setMacroXY(nextXY);
+    engine.loadPatch(reverted);
+    patchRef.current = reverted;
+    setPatch(reverted);
+    setSelectedNodeId(reverted.nodes[0]?.id || null);
+    setSelectedConnId(null);
+    setFitTrigger((v) => v + 1);
+    showNotice(`Reverted "${reverted.name}"`);
+  }, [baselinePatch, engine, pushHistorySnapshot, showNotice]);
+
+  const handleToggleFavorite = useCallback((id: string) => {
+    setFavoriteIds((prev) =>
+      prev.includes(id) ? prev.filter((fid) => fid !== id) : [id, ...prev]
+    );
   }, []);
 
+  const handleMoveNode = useCallback(
+    (nodeId: string, position: { x: number; y: number }) => {
+      applyTrackedMutation(
+        (prev) => ({
+          ...prev,
+          nodes: prev.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
+        }),
+        false
+      );
+    },
+    [applyTrackedMutation]
+  );
+
   const handleUpdateNodeParam = useCallback(
-    (nodeId: string, key: string, value: number | string | boolean) => {
+    (
+      nodeId: string,
+      key: string,
+      value: number | string | boolean,
+      recordHistory = true
+    ) => {
       engine.updateNodeParams(nodeId, { [key]: value });
-      setPatch((prev) => ({
+      applyTrackedMutation(
+        (prev) => ({
+          ...prev,
+          nodes: prev.nodes.map((n) =>
+            n.id === nodeId ? { ...n, params: { ...n.params, [key]: value } } : n
+          ),
+        }),
+        recordHistory
+      );
+    },
+    [applyTrackedMutation, engine]
+  );
+
+  const handleAddNode = useCallback(
+    (type: ModuleType, position: { x: number; y: number }) => {
+      const newId = `${type}_${Date.now().toString(36)}`;
+      const newNode = createDefaultNode(type, newId, position);
+      applyTrackedMutation((prev) => ({
+        ...prev,
+        nodes: [...prev.nodes, newNode],
+      }));
+      setSelectedNodeId(newId);
+      setSelectedConnId(null);
+    },
+    [applyTrackedMutation]
+  );
+
+  const handleToggleBypass = useCallback(
+    (nodeId: string) => {
+      applyTrackedMutation((prev) => ({
         ...prev,
         nodes: prev.nodes.map((n) =>
-          n.id === nodeId ? { ...n, params: { ...n.params, [key]: value } } : n
+          n.id === nodeId ? { ...n, bypassed: !n.bypassed } : n
         ),
       }));
     },
-    [engine]
+    [applyTrackedMutation]
   );
-
-  const handleAddNode = useCallback((type: ModuleType, position: { x: number; y: number }) => {
-    const newId = `${type}_${Date.now().toString(36)}`;
-    const newNode = createDefaultNode(type, newId, position);
-    setPatch((prev) => ({
-      ...prev,
-      nodes: [...prev.nodes, newNode],
-    }));
-    setSelectedNodeId(newId);
-  }, []);
-
-  const handleToggleBypass = useCallback((nodeId: string) => {
-    setPatch((prev) => ({
-      ...prev,
-      nodes: prev.nodes.map((n) =>
-        n.id === nodeId ? { ...n, bypassed: !n.bypassed } : n
-      ),
-    }));
-  }, []);
 
   const handleDeleteNode = useCallback(
     (nodeId: string) => {
-      setPatch((prev) => ({
+      if (nodeId === 'output') return;
+      applyTrackedMutation((prev) => ({
         ...prev,
         nodes: prev.nodes.filter((n) => n.id !== nodeId),
         connections: prev.connections.filter(
@@ -502,33 +761,35 @@ export default function App() {
               .map((s) => (s.via === nodeId ? { ...s, via: 'none' } : s))
           : prev.modMatrix,
       }));
-      if (selectedNodeId === nodeId) setSelectedNodeId(null);
+      setSelectedNodeId((cur) => (cur === nodeId ? null : cur));
+      setSelectedConnId(null);
     },
-    [selectedNodeId]
+    [applyTrackedMutation]
   );
 
   const handleDuplicateNode = useCallback(
     (nodeId: string) => {
-      const orig = patch.nodes.find((n) => n.id === nodeId);
-      if (!orig) return;
+      const orig = patchRef.current.nodes.find((n) => n.id === nodeId);
+      if (!orig || orig.type === 'output') return;
       const copyId = `${orig.type}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
-      const cloned = clonePatch({ ...patch, nodes: [orig], connections: [] }).nodes[0];
+      const cloned = clonePatch({ ...patchRef.current, nodes: [orig], connections: [] }).nodes[0];
       cloned.id = copyId;
       cloned.position = { x: orig.position.x + 36, y: orig.position.y + 36 };
       cloned.label = `${orig.label || MODULE_REGISTRY[orig.type].label} Copy`;
-      setPatch((prev) => ({
+      applyTrackedMutation((prev) => ({
         ...prev,
         nodes: [...prev.nodes, cloned],
       }));
       setSelectedNodeId(copyId);
+      setSelectedConnId(null);
     },
-    [patch]
+    [applyTrackedMutation]
   );
 
   const handleAddConnection = useCallback(
     (fromNode: string, fromPort: string, toNode: string, toPort: string) => {
       let blockedCycle = false;
-      setPatch((prev) => {
+      applyTrackedMutation((prev) => {
         const exists = prev.connections.some(
           (c) =>
             c.fromNode === fromNode &&
@@ -536,7 +797,7 @@ export default function App() {
             c.toNode === toNode &&
             c.toPort === toPort
         );
-        if (exists) return prev;
+        if (exists) return null;
 
         const srcNodeDef = prev.nodes.find((n) => n.id === fromNode);
         const dstNodeDef = prev.nodes.find((n) => n.id === toNode);
@@ -549,7 +810,7 @@ export default function App() {
         if (isAudioLink) {
           if (fromNode === toNode) {
             blockedCycle = true;
-            return prev;
+            return null;
           }
           // BFS from toNode along existing audio connections to ensure no path returns to fromNode
           const adj = new Map<string, string[]>();
@@ -572,7 +833,7 @@ export default function App() {
             const cur = queue.shift()!;
             if (cur === fromNode) {
               blockedCycle = true;
-              return prev;
+              return null;
             }
             for (const nxt of adj.get(cur) || []) {
               if (!visited.has(nxt)) {
@@ -601,49 +862,104 @@ export default function App() {
         showNotice('Audio feedback loop blocked to keep the synth stable.');
       }
     },
-    [showNotice]
+    [applyTrackedMutation, showNotice]
   );
 
-  const handleUpdateConnectionAmount = useCallback((connId: string, amount: number) => {
-    setPatch((prev) => ({
-      ...prev,
-      connections: prev.connections.map((c) => (c.id === connId ? { ...c, amount } : c)),
-    }));
-  }, []);
+  const handleUpdateConnectionAmount = useCallback(
+    (connId: string, amount: number, recordHistory = true) => {
+      applyTrackedMutation(
+        (prev) => ({
+          ...prev,
+          connections: prev.connections.map((c) => (c.id === connId ? { ...c, amount } : c)),
+        }),
+        recordHistory
+      );
+    },
+    [applyTrackedMutation]
+  );
 
-  const handleDeleteConnection = useCallback((connId: string) => {
-    setPatch((prev) => ({
-      ...prev,
-      connections: prev.connections.filter((c) => c.id !== connId),
-    }));
-  }, []);
+  const handleDeleteConnection = useCallback(
+    (connId: string) => {
+      applyTrackedMutation((prev) => ({
+        ...prev,
+        connections: prev.connections.filter((c) => c.id !== connId),
+      }));
+      setSelectedConnId((cur) => (cur === connId ? null : cur));
+    },
+    [applyTrackedMutation]
+  );
 
   const handleUpdateModMatrix = useCallback(
     (slots: ModMatrixSlot[]) => {
       engine.updateModMatrixSlots(slots);
-      setPatch((prev) => ({
+      applyTrackedMutation((prev) => ({
         ...prev,
         modMatrix: slots,
       }));
     },
-    [engine]
+    [applyTrackedMutation, engine]
   );
+
+  const handleQuickMapMacro = useCallback(
+    (nodeId: string, paramKey: string, axis: 'macroX' | 'macroY') => {
+      const currentSlots = patchRef.current.modMatrix ?? [];
+      const existing = currentSlots.find(
+        (s) => s.source === axis && s.targetNodeId === nodeId && s.targetParam === paramKey
+      );
+      let nextSlots: ModMatrixSlot[];
+      if (existing) {
+        nextSlots = currentSlots.filter((s) => s.id !== existing.id);
+        showNotice(`Removed ${axis === 'macroX' ? 'Macro X' : 'Macro Y'} link`);
+      } else {
+        const defaultAmt =
+          paramKey === 'cutoff' || paramKey === 'tone'
+            ? 0.35
+            : paramKey === 'pitch'
+              ? 0.08
+              : 0.3;
+        const newSlot: ModMatrixSlot = {
+          id: `mod_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+          enabled: true,
+          source: axis,
+          via: 'none',
+          targetNodeId: nodeId,
+          targetParam: paramKey,
+          amount: defaultAmt,
+          curve: 'linear',
+        };
+        nextSlots = [...currentSlots, newSlot];
+        showNotice(`Mapped ${paramKey} to ${axis === 'macroX' ? 'Macro X' : 'Macro Y'}`);
+      }
+      engine.updateModMatrixSlots(nextSlots);
+      applyTrackedMutation((prev) => ({
+        ...prev,
+        modMatrix: nextSlots,
+      }));
+    },
+    [applyTrackedMutation, engine, showNotice]
+  );
+
+  const handleInspectModulation = useCallback((nodeId: string) => {
+    setFocusedModNodeId(nodeId);
+    setActiveView('modMatrix');
+    setMobileTab('modMatrix');
+  }, []);
 
   const handleAutoLayout = useCallback(
     (modeOverride?: AutoLayoutMode) => {
       const targetMode = modeOverride ?? layoutMode;
-      setPatch((prev) => ({
+      applyTrackedMutation((prev) => ({
         ...prev,
         nodes: computeAutoLayout(prev, targetMode),
       }));
     },
-    [layoutMode]
+    [applyTrackedMutation, layoutMode]
   );
 
   const handleSaveCurrentPatch = useCallback(
     (name: string) => {
       const customPatch: SynthPatch = {
-        ...clonePatch(patch),
+        ...clonePatch(patchRef.current),
         id: `custom-${Date.now().toString(36)}`,
         name,
         category: 'custom',
@@ -651,14 +967,20 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       };
       setSavedPresets((prev) => [customPatch, ...prev]);
+      patchRef.current = customPatch;
       setPatch(customPatch);
+      setBaselinePatch(clonePatch(customPatch));
+      const emptyH = { past: [], future: [] };
+      historyRef.current = emptyH;
+      setHistory(emptyH);
       showNotice(`Saved "${name}" to browser library`);
     },
-    [patch, showNotice]
+    [showNotice]
   );
 
   const handleDeleteSavedPatch = useCallback((id: string) => {
     setSavedPresets((prev) => prev.filter((p) => p.id !== id));
+    setFavoriteIds((prev) => prev.filter((fid) => fid !== id));
   }, []);
 
   const handleImportPatchJson = useCallback(
@@ -670,7 +992,7 @@ export default function App() {
           return { ok: false, error: error || 'Invalid patch JSON structure.' };
         }
         imported.category = 'custom';
-        applyPatchSelection(imported);
+        applyPatchSelection(imported, true);
         setSavedPresets((prev) => [imported, ...prev.filter((p) => p.id !== imported.id)]);
         showNotice(`Loaded patch "${imported.name}"`);
         return { ok: true };
@@ -685,20 +1007,21 @@ export default function App() {
   );
 
   const handleExportJson = useCallback(() => {
-    const json = JSON.stringify(patch, null, 2);
+    const json = JSON.stringify(patchRef.current, null, 2);
     const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${patch.id || 'timbre-lab-patch'}.json`;
+    a.download = `${patchRef.current.id || 'timbre-lab-patch'}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showNotice(`Exported ${patch.name}.json`);
-  }, [patch, showNotice]);
+    showNotice(`Exported ${patchRef.current.name}.json`);
+  }, [showNotice]);
 
   const handlePlayTune = useCallback(
     (tune: TuneSequence, loadSuggestedPreset = false) => {
       clearAuditionTimers();
+      setAuditioningPresetId(null);
       if (loadSuggestedPreset && tune.suggestedPresetId) {
         const found = allBuiltInPresets.find((p) => p.id === tune.suggestedPresetId);
         if (found) {
@@ -713,28 +1036,35 @@ export default function App() {
 
   const handleLoadPresetById = useCallback(
     (presetId: string, openPatchbay: boolean) => {
+      clearAuditionTimers();
+      setAuditioningPresetId(null);
       const found = allBuiltInPresets.find((p) => p.id === presetId);
       if (!found) return;
       const cloned = clonePatch(found);
-      applyPatchSelection(cloned);
+      applyPatchSelection(cloned, true);
       if (openPatchbay) {
         setActiveView('patchbay');
         setMobileTab('patchbay');
       }
       showNotice(`Loaded preset "${found.name}"`);
     },
-    [allBuiltInPresets, applyPatchSelection, showNotice]
+    [allBuiltInPresets, applyPatchSelection, clearAuditionTimers, showNotice]
   );
 
-  const handleAuditionPreset = useCallback(
-    (presetId: string) => {
-      const found = allBuiltInPresets.find((p) => p.id === presetId);
-      if (!found) return;
+  const handleStopAudition = useCallback(() => {
+    clearAuditionTimers();
+    engine.allNotesOff();
+    setAuditioningPresetId(null);
+  }, [clearAuditionTimers, engine]);
+
+  const startPresetAudition = useCallback(
+    (target: SynthPatch) => {
       clearAuditionTimers();
       tunePlayer.stop();
-      const cloned = clonePatch(found);
-      applyPatchSelection(cloned);
-      showNotice(`Auditioning "${found.name}" — play the keyboard below too!`);
+      const cloned = clonePatch(target);
+      applyPatchSelection(cloned, true);
+      setAuditioningPresetId(target.id);
+      showNotice(`Auditioning "${target.name}" — play the keyboard below too!`);
 
       void (async () => {
         await engine.init();
@@ -751,10 +1081,118 @@ export default function App() {
           }, step.delayMs);
           auditionTimersRef.current.push(onTid);
         }
+        const doneTid = window.setTimeout(() => {
+          setAuditioningPresetId((cur) => (cur === target.id ? null : cur));
+        }, 1780);
+        auditionTimersRef.current.push(doneTid);
       })();
     },
-    [allBuiltInPresets, clearAuditionTimers, engine, showNotice, tunePlayer]
+    [applyPatchSelection, clearAuditionTimers, engine, showNotice, tunePlayer]
   );
+
+  const handleAuditionPresetById = useCallback(
+    (presetId: string) => {
+      const found = allBuiltInPresets.find((p) => p.id === presetId);
+      if (found) startPresetAudition(found);
+    },
+    [allBuiltInPresets, startPresetAudition]
+  );
+
+  // Global keyboard shortcuts (Undo/Redo, Delete, Bypass, Duplicate, Fit View, Shortcuts overlay)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+        const lower = e.key.toLowerCase();
+        if (lower === 'z') {
+          e.preventDefault();
+          if (e.shiftKey) handleRedo();
+          else handleUndo();
+          return;
+        }
+        if (lower === 'y') {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
+
+      if (activeView === 'embed' || activeView === 'midi' || sampleAnalyzerOpen) {
+        return;
+      }
+
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (shortcutsOpen) {
+          setShortcutsOpen(false);
+          return;
+        }
+        if (selectedConnId) {
+          setSelectedConnId(null);
+        }
+        return;
+      }
+
+      if (activeView !== 'patchbay') return;
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey) {
+        if (selectedConnId) {
+          e.preventDefault();
+          handleDeleteConnection(selectedConnId);
+          return;
+        }
+        if (selectedNodeId && selectedNodeId !== 'output') {
+          e.preventDefault();
+          handleDeleteNode(selectedNodeId);
+          return;
+        }
+      }
+
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const upper = e.key.toUpperCase();
+        if (upper === 'B' && selectedNodeId && selectedNodeId !== 'output') {
+          e.preventDefault();
+          handleToggleBypass(selectedNodeId);
+        } else if (upper === 'D' && selectedNodeId && selectedNodeId !== 'output') {
+          e.preventDefault();
+          handleDuplicateNode(selectedNodeId);
+        } else if (upper === 'F') {
+          e.preventDefault();
+          setFitTrigger((v) => v + 1);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    activeView,
+    sampleAnalyzerOpen,
+    shortcutsOpen,
+    selectedConnId,
+    selectedNodeId,
+    handleUndo,
+    handleRedo,
+    handleDeleteConnection,
+    handleDeleteNode,
+    handleToggleBypass,
+    handleDuplicateNode,
+  ]);
 
   const handleSelectNavView = (view: StudioView) => {
     setActiveView(view);
@@ -862,7 +1300,7 @@ export default function App() {
               setMobileTab('modMatrix');
             }}
             onLoadPresetById={handleLoadPresetById}
-            onAuditionPreset={handleAuditionPreset}
+            onAuditionPreset={handleAuditionPresetById}
           />
         </div>
       ) : activeView === 'about' || mobileTab === 'about' ? (
@@ -909,7 +1347,14 @@ export default function App() {
               tunes={TEST_TUNES}
               activePatchId={patch.id}
               tuneState={tuneState}
+              favoriteIds={favoriteIds}
+              auditioningPresetId={auditioningPresetId}
+              isDirty={isDirty}
               onSelectPatch={handleSelectPatch}
+              onToggleFavorite={handleToggleFavorite}
+              onAuditionPreset={startPresetAudition}
+              onStopAudition={handleStopAudition}
+              onRevertPatch={handleRevertPatch}
               onSaveCurrentPatch={handleSaveCurrentPatch}
               onDeleteSavedPatch={handleDeleteSavedPatch}
               onImportPatchJson={handleImportPatchJson}
@@ -945,8 +1390,11 @@ export default function App() {
           {activeView === 'modMatrix' || mobileTab === 'modMatrix' ? (
             <ModMatrixPanel
               patch={patch}
+              focusedNodeId={focusedModNodeId}
+              onClearFocus={() => setFocusedModNodeId(null)}
               onUpdateModMatrix={handleUpdateModMatrix}
               onBackToPatchbay={() => {
+                setFocusedModNodeId(null);
                 setActiveView('patchbay');
                 setMobileTab('patchbay');
               }}
@@ -965,11 +1413,16 @@ export default function App() {
                 >
                   <PanelLeft className="w-3.5 h-3.5" />
                 </button>
-                <span className="font-semibold text-slate-900 dark:text-slate-100 max-w-[280px] truncate">
+                <span className="font-semibold text-slate-900 dark:text-slate-100 max-w-[260px] truncate">
                   {patch.name}
                 </span>
+                {isDirty && (
+                  <span className="text-[10px] font-mono font-semibold text-amber-700 dark:text-amber-400">
+                    • Edited
+                  </span>
+                )}
                 <span className="text-slate-300 dark:text-slate-600" aria-hidden="true">·</span>
-                <span className="text-slate-600 dark:text-slate-400 truncate max-w-[210px]">
+                <span className="text-slate-600 dark:text-slate-400 truncate max-w-[190px]">
                   {patch.regionOrFamily || 'Custom Patch'}
                 </span>
                 <button
@@ -987,21 +1440,46 @@ export default function App() {
               <PatchbayCanvas
                 patch={patch}
                 selectedNodeId={selectedNodeId}
+                selectedConnId={selectedConnId}
                 activeNotesCount={activeNotes.length}
                 layoutMode={layoutMode}
+                canUndo={history.past.length > 0}
+                canRedo={history.future.length > 0}
+                undoCount={history.past.length}
+                redoCount={history.future.length}
+                fitTrigger={fitTrigger}
+                showOnboarding={showOnboarding}
+                shortcutsOpen={shortcutsOpen}
+                onToggleShortcuts={() => setShortcutsOpen((v) => !v)}
+                onDismissOnboarding={() => {
+                  setShowOnboarding(false);
+                  try {
+                    localStorage.setItem(ONBOARDING_DISMISSED_KEY, '1');
+                  } catch {
+                    // ignore storage error
+                  }
+                }}
+                onUndo={handleUndo}
+                onRedo={handleRedo}
                 onChangeLayoutMode={setLayoutMode}
                 theme={theme}
                 onSelectNode={(id) => {
                   setSelectedNodeId(id);
                 }}
+                onSelectConn={setSelectedConnId}
                 onMoveNode={handleMoveNode}
                 onAddNode={handleAddNode}
                 onToggleBypass={handleToggleBypass}
+                onDuplicateNode={handleDuplicateNode}
+                onDeleteNode={handleDeleteNode}
+                onInspectModulation={handleInspectModulation}
                 onAddConnection={handleAddConnection}
                 onUpdateConnectionAmount={handleUpdateConnectionAmount}
                 onDeleteConnection={handleDeleteConnection}
                 onAutoLayout={handleAutoLayout}
                 onOpenSampleAnalyzer={() => setSampleAnalyzerOpen(true)}
+                onDragStartHistory={handleStartGestureHistory}
+                onCommitHistory={handleCommitGestureHistory}
               />
             </>
           )}
@@ -1070,6 +1548,8 @@ export default function App() {
             <NodeInspector
               patch={patch}
               selectedNodeId={selectedNodeId}
+              showAllParams={showAllParams}
+              onToggleShowAllParams={() => setShowAllParams((v) => !v)}
               onUpdateNodeParam={handleUpdateNodeParam}
               onToggleBypass={handleToggleBypass}
               onDeleteNode={handleDeleteNode}
@@ -1077,8 +1557,12 @@ export default function App() {
               onUpdateConnectionAmount={handleUpdateConnectionAmount}
               onDeleteConnection={handleDeleteConnection}
               onUpdatePatchMeta={(updates) =>
-                setPatch((prev) => ({ ...prev, ...updates }))
+                applyTrackedMutation((prev) => ({ ...prev, ...updates }))
               }
+              onOpenModMatrixForNode={handleInspectModulation}
+              onQuickMapMacro={handleQuickMapMacro}
+              onDragStartHistory={handleStartGestureHistory}
+              onCommitHistory={handleCommitGestureHistory}
               onCollapse={() => setRightInspectorOpen(false)}
             />
           </div>
@@ -1088,32 +1572,32 @@ export default function App() {
 
       {/* Bottom Docked Scopes, Macro XY, Transport & Playable Keyboard */}
       <div className="shrink-0 bg-[#F4F6FA] dark:bg-[#07090E] border-t border-slate-200 dark:border-slate-800">
-        {/* Desktop Collapse/Expand Bar for Sidebars & Bottom 2 Rows */}
-        <div className="hidden lg:flex items-center justify-between h-8 px-3 bg-white dark:bg-[#0B0F17] border-b border-slate-200 dark:border-slate-800/80 text-[11px]">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                const anyOpen = telemetryRowOpen || keyboardRowOpen;
-                setTelemetryRowOpen(!anyOpen);
-                setKeyboardRowOpen(!anyOpen);
-              }}
-              className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-slate-50 dark:bg-[#111622] border border-slate-300 dark:border-slate-800 hover:border-amber-500/50 text-slate-800 dark:text-slate-200 font-medium transition-colors"
-              title={
-                telemetryRowOpen || keyboardRowOpen
-                  ? 'Collapse both bottom rows to focus on sound modelling'
-                  : 'Expand Scopes, Macro XY, Transport & Keyboard'
-              }
-            >
-              {telemetryRowOpen || keyboardRowOpen ? (
-                <ChevronDown className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
-              ) : (
-                <ChevronUp className="w-3.5 h-3.5 text-cyan-700 dark:text-cyan-400" />
-              )}
-              <span>
-                {telemetryRowOpen || keyboardRowOpen ? 'Focus Modelling' : 'Show Performance Dock'}
-              </span>
-            </button>
+        {/* Slim Dock Control & Micro-Transport Bar */}
+        <div className="hidden lg:flex items-center justify-between h-9 px-3 bg-white dark:bg-[#0B0F17] border-b border-slate-200 dark:border-slate-800/80 text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <div className="inline-flex items-center rounded border border-slate-200 dark:border-slate-800 bg-slate-100/80 dark:bg-[#090C12] p-0.5 gap-0.5">
+              {(
+                [
+                  { id: 'keysXy', label: 'Keys & XY' },
+                  { id: 'scopesTransport', label: 'Scopes & Transport' },
+                  { id: 'split', label: 'Split All' },
+                  { id: 'collapsed', label: 'Hide Dock' },
+                ] as { id: DockTab; label: string }[]
+              ).map((tabItem) => (
+                <button
+                  key={tabItem.id}
+                  type="button"
+                  onClick={() => setDockTab(tabItem.id)}
+                  className={`px-2 py-0.5 rounded font-medium transition-colors ${
+                    dockTab === tabItem.id
+                      ? 'bg-white dark:bg-[#171E2E] text-amber-800 dark:text-amber-300 border border-slate-200 dark:border-slate-700'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 border border-transparent'
+                  }`}
+                >
+                  {tabItem.label}
+                </button>
+              ))}
+            </div>
 
             <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-800" />
 
@@ -1145,63 +1629,64 @@ export default function App() {
               <span>Inspector</span>
             </button>
 
-            <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-800" />
-
-            <button
-              type="button"
-              onClick={() => setTelemetryRowOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
-                telemetryRowOpen
-                  ? 'bg-slate-200/80 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-200'
-                  : 'bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-            >
-              <span>Scopes · XY · Transport</span>
-              {telemetryRowOpen ? (
-                <ChevronDown className="w-3 h-3 text-slate-500 dark:text-slate-400" />
-              ) : (
-                <ChevronUp className="w-3 h-3 text-slate-500" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setKeyboardRowOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
-                keyboardRowOpen
-                  ? 'bg-slate-200/80 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-200'
-                  : 'bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-            >
-              <span>Keyboard</span>
-              {keyboardRowOpen ? (
-                <ChevronDown className="w-3 h-3 text-slate-500 dark:text-slate-400" />
-              ) : (
-                <ChevronUp className="w-3 h-3 text-slate-500" />
-              )}
-            </button>
           </div>
 
-          <div className="flex items-center gap-3 text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-400">
-            {tuneState.isPlaying && (
-              <div className="flex items-center gap-1.5 text-amber-800 dark:text-amber-300">
-                <span className="truncate max-w-[180px]">
-                  {TEST_TUNES.find((t) => t.id === tuneState.tuneId)?.title ?? 'Playing'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => tunePlayer.stop()}
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-700 dark:text-rose-300 hover:bg-rose-500/25"
-                  title="Stop Tune"
-                >
-                  <Square className="w-2.5 h-2.5 fill-current" />
-                  <span>Stop</span>
-                </button>
-              </div>
+          <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-400">
+            {isDirty && (
+              <button
+                type="button"
+                onClick={handleRevertPatch}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/12 border border-amber-500/40 text-amber-800 dark:text-amber-300 hover:bg-amber-500/20 font-sans font-medium transition-colors"
+                title={`Revert unsaved edits back to "${baselinePatch.name}"`}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Modified · Revert</span>
+              </button>
             )}
+
+            <div className="inline-flex items-center gap-1 bg-slate-100 dark:bg-[#111622] border border-slate-200 dark:border-slate-800 rounded px-1.5 py-0.5">
+              <button
+                type="button"
+                onClick={() =>
+                  tuneState.isPlaying ? tunePlayer.stop() : void tunePlayer.play()
+                }
+                className={`inline-flex items-center gap-1 font-sans font-medium transition-colors ${
+                  tuneState.isPlaying
+                    ? 'text-rose-700 dark:text-rose-300 hover:text-rose-600'
+                    : 'text-emerald-700 dark:text-emerald-400 hover:text-emerald-600'
+                }`}
+                title={tuneState.isPlaying ? 'Stop Tune Playback' : 'Play Selected Test Tune'}
+              >
+                {tuneState.isPlaying ? (
+                  <Square className="w-2.5 h-2.5 fill-current" />
+                ) : (
+                  <Play className="w-2.5 h-2.5 fill-current" />
+                )}
+                <span className="max-w-[140px] truncate">
+                  {TEST_TUNES.find((t) => t.id === tuneState.tuneId)?.title ?? 'Demo Tune'}
+                </span>
+              </button>
+            </div>
+
             <span>
               Voices: <span className="text-slate-900 dark:text-slate-200">{activeNotes.length}</span>
             </span>
+
+            {activeNotes.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  tunePlayer.stop();
+                  handleStopAudition();
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/12 border border-rose-500/40 text-rose-700 dark:text-rose-300 hover:bg-rose-500/20 font-sans font-medium"
+                title="Silence all active voices"
+              >
+                <VolumeX className="w-3 h-3" />
+                <span>All Off</span>
+              </button>
+            )}
+
             <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-800" />
             <button
               type="button"
@@ -1225,11 +1710,11 @@ export default function App() {
           </div>
         </div>
 
-        {/* Desktop Telemetry, Macro XY & Tune Transport Strip */}
-        {telemetryRowOpen && (
-          <div className="hidden lg:grid grid-cols-12 gap-2.5 p-2.5 bg-[#EBEEF5] dark:bg-[#090C12]">
-            <div className="col-span-5 min-w-0">
-              <WaveformScopes engine={engine} compact theme={theme} />
+        {/* Desktop Compact Tabbed Dock Views */}
+        {dockTab === 'keysXy' && (
+          <div className="hidden lg:grid grid-cols-12 gap-2.5 p-2 bg-[#EBEEF5] dark:bg-[#090C12] items-stretch">
+            <div className="col-span-9 min-w-0">
+              <PlayableKeyboard engine={engine} activeNotes={activeNotes} compactDock />
             </div>
             <div className="col-span-3 min-w-0">
               <MacroXYPad
@@ -1243,7 +1728,15 @@ export default function App() {
                 onChange={handleMacroXYChange}
               />
             </div>
-            <div className="col-span-4 min-w-0">
+          </div>
+        )}
+
+        {dockTab === 'scopesTransport' && (
+          <div className="hidden lg:grid grid-cols-12 gap-2.5 p-2 bg-[#EBEEF5] dark:bg-[#090C12]">
+            <div className="col-span-7 min-w-0">
+              <WaveformScopes engine={engine} compact theme={theme} />
+            </div>
+            <div className="col-span-5 min-w-0">
               <MidiAndTransportBar
                 tunes={TEST_TUNES}
                 tuneState={tuneState}
@@ -1268,12 +1761,55 @@ export default function App() {
           </div>
         )}
 
-        {/* Playable Keyboard */}
-        <div
-          className={`${mobileKeysOpen ? 'block' : 'hidden'} ${
-            keyboardRowOpen ? 'lg:block' : 'lg:hidden'
-          }`}
-        >
+        {dockTab === 'split' && (
+          <>
+            <div className="hidden lg:grid grid-cols-12 gap-2.5 p-2.5 bg-[#EBEEF5] dark:bg-[#090C12]">
+              <div className="col-span-5 min-w-0">
+                <WaveformScopes engine={engine} compact theme={theme} />
+              </div>
+              <div className="col-span-3 min-w-0">
+                <MacroXYPad
+                  compact
+                  x={macroXY.x}
+                  y={macroXY.y}
+                  defaultX={patch.macroDefaults?.x ?? 0.5}
+                  defaultY={patch.macroDefaults?.y ?? 0.5}
+                  xLabel={patch.macroLabels?.x}
+                  yLabel={patch.macroLabels?.y}
+                  onChange={handleMacroXYChange}
+                />
+              </div>
+              <div className="col-span-4 min-w-0">
+                <MidiAndTransportBar
+                  tunes={TEST_TUNES}
+                  tuneState={tuneState}
+                  midiState={midiState}
+                  lastMidiEvent={midiLog[0] || null}
+                  audioOutputDevices={audioOutputDevices}
+                  selectedOutputDeviceId={selectedOutputDeviceId}
+                  outputSelectionSupported={audioOutputSupported}
+                  onSelectOutputDevice={(id) => void handleSelectOutputDevice(id)}
+                  onRefreshAudioOutputs={() => void refreshAudioOutputs(true)}
+                  onSelectTune={(t) => handlePlayTune(t, true)}
+                  onTogglePlay={() =>
+                    tuneState.isPlaying ? tunePlayer.pause() : void tunePlayer.play()
+                  }
+                  onStop={() => tunePlayer.stop()}
+                  onChangeBpm={(bpm) => tunePlayer.setBpm(bpm)}
+                  onToggleLoop={() => tunePlayer.setLoop(!tuneState.loop)}
+                  onConnectMidi={() => void midiController.connect()}
+                  onSelectMidiDevice={(id) => midiController.selectDevice(id)}
+                />
+              </div>
+            </div>
+            <div className="hidden lg:block">
+              <PlayableKeyboard engine={engine} activeNotes={activeNotes} />
+            </div>
+          </>
+        )}
+
+        {/* Mobile Playable Keyboard */}
+        <div className={`${mobileKeysOpen ? 'block' : 'hidden'} lg:hidden`}>
           <PlayableKeyboard engine={engine} activeNotes={activeNotes} />
         </div>
       </div>

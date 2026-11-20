@@ -14,7 +14,10 @@ interface PrecisionSliderProps {
   accent?: 'amber' | 'cyan';
   compact?: boolean;
   showSteppers?: boolean;
+  defaultValue?: number;
   onChange: (value: number) => void;
+  onDragStart?: () => void;
+  onCommit?: () => void;
   onRelease?: () => void;
   className?: string;
 }
@@ -61,7 +64,10 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
   accent = 'amber',
   compact = false,
   showSteppers = !compact,
+  defaultValue,
   onChange,
+  onDragStart,
+  onCommit,
   onRelease,
   className = '',
 }) => {
@@ -121,6 +127,7 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
     e.stopPropagation();
     const track = trackRef.current;
     if (!track) return;
+    onDragStart?.();
     track.setPointerCapture(e.pointerId);
     track.focus();
 
@@ -145,6 +152,16 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
         wasFine: false,
       };
     }
+  };
+
+  const handleTrackDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (defaultValue === undefined) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onDragStart?.();
+    const clampedDefault = clamp(defaultValue, min, max);
+    onChange(integer ? Math.round(clampedDefault) : clampedDefault);
+    onCommit?.();
   };
 
   const handleTrackPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -175,14 +192,17 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
       if (trackRef.current?.hasPointerCapture(e.pointerId)) {
         trackRef.current.releasePointerCapture(e.pointerId);
       }
+      onCommit?.();
       onRelease?.();
     }
   };
 
   const nudge = (direction: 1 | -1, useFine: boolean) => {
+    onDragStart?.();
     const delta = useFine ? effectiveFineStep : step;
     const next = clamp(roundToStep(value + direction * delta, delta), min, max);
     onChange(integer ? Math.round(next) : next);
+    onCommit?.();
   };
 
   const handleTrackKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -195,10 +215,14 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
       nudge(-1, useFine);
     } else if (e.key === 'Home') {
       e.preventDefault();
+      onDragStart?.();
       onChange(min);
+      onCommit?.();
     } else if (e.key === 'End') {
       e.preventDefault();
+      onDragStart?.();
       onChange(max);
+      onCommit?.();
     }
   };
 
@@ -209,6 +233,7 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
       const finalVal = integer ? Math.round(clamped) : roundToStep(clamped, Math.min(effectiveFineStep, 0.0001));
       onChange(finalVal);
       setDraft(formatDisplayValue(finalVal, step, integer));
+      onCommit?.();
     } else {
       setDraft(formatDisplayValue(value, step, integer));
     }
@@ -244,8 +269,13 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
           onPointerMove={handleTrackPointerMove}
           onPointerUp={handleTrackPointerUp}
           onPointerCancel={handleTrackPointerUp}
+          onDoubleClick={handleTrackDoubleClick}
           onKeyDown={handleTrackKeyDown}
-          title="Drag to adjust · Hold Shift for 10x fine control"
+          title={
+            defaultValue !== undefined
+              ? 'Drag to adjust · Shift for 10x fine · Double-click to reset'
+              : 'Drag to adjust · Hold Shift for 10x fine control'
+          }
           className="relative flex-1 min-w-[44px] h-7 flex items-center cursor-ew-resize touch-none select-none focus:outline-none group"
         >
           <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
@@ -267,6 +297,7 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
             value={draft}
             aria-label={`${label || 'Parameter'} numeric value`}
             onFocus={(e) => {
+              onDragStart?.();
               setIsEditing(true);
               e.target.select();
             }}
@@ -350,8 +381,13 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
           onPointerMove={handleTrackPointerMove}
           onPointerUp={handleTrackPointerUp}
           onPointerCancel={handleTrackPointerUp}
+          onDoubleClick={handleTrackDoubleClick}
           onKeyDown={handleTrackKeyDown}
-          title="Drag to adjust · Hold Shift or toggle Fine for 10x resolution · Use arrow keys to step"
+          title={
+            defaultValue !== undefined
+              ? 'Drag to adjust · Shift or Fine for 10x · Double-click to reset'
+              : 'Drag to adjust · Hold Shift or toggle Fine for 10x resolution · Use arrow keys to step'
+          }
           className="relative flex-1 min-w-[90px] h-7 flex items-center cursor-ew-resize touch-none select-none focus:outline-none group"
         >
           <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-[#07090E] border border-slate-300 dark:border-slate-800 overflow-hidden relative">
@@ -387,6 +423,7 @@ export const PrecisionSlider: React.FC<PrecisionSliderProps> = ({
               value={draft}
               aria-label={`${label || 'Parameter'} numeric value`}
               onFocus={(e) => {
+                onDragStart?.();
                 setIsEditing(true);
                 e.target.select();
               }}
