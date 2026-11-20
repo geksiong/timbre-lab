@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   SlidersHorizontal,
   Piano,
-  PanelLeft,
-  PanelRight,
   PanelLeftOpen,
   PanelRightOpen,
   Square,
@@ -1401,18 +1399,8 @@ export default function App() {
             />
           ) : (
             <>
-              {/* Desktop Drawer Toggles + Active Patch Name */}
-              <div className="hidden lg:flex items-center gap-2 absolute bottom-3 left-3 z-20 bg-white/95 dark:bg-[#111622]/90 border border-slate-200 dark:border-slate-800 rounded-md px-2.5 py-1.5 text-xs shadow-xs dark:shadow-none">
-                <button
-                  type="button"
-                  onClick={() => setLeftDrawerOpen((v) => !v)}
-                  title={leftDrawerOpen ? 'Collapse Left Sidebar' : 'Expand Left Sidebar'}
-                  className={`p-1 rounded transition-colors ${
-                    leftDrawerOpen ? 'text-amber-700 dark:text-amber-400 hover:text-amber-600 dark:hover:text-amber-300' : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                  }`}
-                >
-                  <PanelLeft className="w-3.5 h-3.5" />
-                </button>
+              {/* Active Patch Label */}
+              <div className="hidden lg:flex items-center gap-2 absolute bottom-3 left-3 z-20 bg-white/95 dark:bg-[#111622]/90 border border-slate-200 dark:border-slate-800 rounded-md px-3 py-1.5 text-xs shadow-xs dark:shadow-none pointer-events-none">
                 <span className="font-semibold text-slate-900 dark:text-slate-100 max-w-[260px] truncate">
                   {patch.name}
                 </span>
@@ -1425,16 +1413,6 @@ export default function App() {
                 <span className="text-slate-600 dark:text-slate-400 truncate max-w-[190px]">
                   {patch.regionOrFamily || 'Custom Patch'}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setRightInspectorOpen((v) => !v)}
-                  title={rightInspectorOpen ? 'Collapse Right Inspector' : 'Expand Right Inspector'}
-                  className={`p-1 rounded ml-1 transition-colors ${
-                    rightInspectorOpen ? 'text-amber-700 dark:text-amber-400 hover:text-amber-600 dark:hover:text-amber-300' : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                  }`}
-                >
-                  <PanelRight className="w-3.5 h-3.5" />
-                </button>
               </div>
 
               <PatchbayCanvas
@@ -1598,37 +1576,6 @@ export default function App() {
                 </button>
               ))}
             </div>
-
-            <div className="h-3.5 w-px bg-slate-200 dark:bg-slate-800" />
-
-            <button
-              type="button"
-              onClick={() => setLeftDrawerOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
-                leftDrawerOpen
-                  ? 'bg-slate-200/80 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-200'
-                  : 'bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-              title="Toggle Left Library Sidebar"
-            >
-              <PanelLeft className="w-3 h-3" />
-              <span>Library</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setRightInspectorOpen((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
-                rightInspectorOpen
-                  ? 'bg-slate-200/80 dark:bg-slate-800/80 border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-200'
-                  : 'bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-              title="Toggle Right Inspector Sidebar"
-            >
-              <PanelRight className="w-3 h-3" />
-              <span>Inspector</span>
-            </button>
-
           </div>
 
           <div className="flex items-center gap-2 text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-400">
