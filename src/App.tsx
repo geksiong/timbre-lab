@@ -5,6 +5,7 @@ import { AMBIENT_PRESETS } from './data/ambientPresets';
 import { GM_PRESETS } from './data/gmPresets';
 import { TEST_TUNES } from './data/testTunes';
 import { MidiController, MidiControllerState } from './engine/MidiController';
+import { AutoLayoutMode, computeAutoLayout } from './engine/autoLayout';
 import { createDefaultNode, MODULE_REGISTRY } from './engine/moduleRegistry';
 import { SynthEngine } from './engine/SynthEngine';
 import { TunePlaybackState, TunePlayer } from './engine/TunePlayer';
@@ -246,6 +247,7 @@ export default function App() {
     () => ETHNIC_PRESETS[0].macroDefaults ?? { x: 0.5, y: 0.5 }
   );
   const [sampleAnalyzerOpen, setSampleAnalyzerOpen] = useState(false);
+  const [layoutMode, setLayoutMode] = useState<AutoLayoutMode>('2d-flow');
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [audioOutputDevices, setAudioOutputDevices] = useState<{ deviceId: string; label: string }[]>([]);
   const [selectedOutputDeviceId, setSelectedOutputDeviceId] = useState<string>('default');
@@ -627,61 +629,16 @@ export default function App() {
     [engine]
   );
 
-  const handleAutoLayout = useCallback(() => {
-    const colOrder: Record<ModuleType, number> = {
-      oscillator: 0,
-      fmOperator: 0,
-      physicalString: 0,
-      modalResonator: 0,
-      blownPipe: 0,
-      subHarmonic: 0,
-      noise: 0,
-      lfo: 0,
-      sampleHold: 0,
-      slopeEnv: 0,
-      stepSequencer: 0,
-      quantizer: 0,
-      cvUtility: 0,
-      crossfader: 1,
-      combFilter: 1,
-      shaper: 1,
-      wavefolder: 1,
-      ringMod: 1,
-      envFollower: 1,
-      bitcrusher: 2,
-      filter: 2,
-      formantFilter: 2,
-      parametricEq: 2,
-      chorus: 3,
-      phaser: 3,
-      granularCloud: 3,
-      envelope: 4,
-      delay: 5,
-      reverb: 6,
-      busCompressor: 6,
-      output: 7,
-    };
-    setPatch((prev) => {
-      const buckets: Record<number, typeof prev.nodes> = {};
-      prev.nodes.forEach((n) => {
-        const col = colOrder[n.type] ?? 1;
-        buckets[col] = buckets[col] || [];
-        buckets[col].push(n);
-      });
-      const updated = prev.nodes.map((n) => {
-        const col = colOrder[n.type] ?? 1;
-        const row = buckets[col].indexOf(n);
-        return {
-          ...n,
-          position: {
-            x: 56 + col * 308,
-            y: 64 + row * 212,
-          },
-        };
-      });
-      return { ...prev, nodes: updated };
-    });
-  }, []);
+  const handleAutoLayout = useCallback(
+    (modeOverride?: AutoLayoutMode) => {
+      const targetMode = modeOverride ?? layoutMode;
+      setPatch((prev) => ({
+        ...prev,
+        nodes: computeAutoLayout(prev, targetMode),
+      }));
+    },
+    [layoutMode]
+  );
 
   const handleSaveCurrentPatch = useCallback(
     (name: string) => {
@@ -1031,6 +988,8 @@ export default function App() {
                 patch={patch}
                 selectedNodeId={selectedNodeId}
                 activeNotesCount={activeNotes.length}
+                layoutMode={layoutMode}
+                onChangeLayoutMode={setLayoutMode}
                 theme={theme}
                 onSelectNode={(id) => {
                   setSelectedNodeId(id);
