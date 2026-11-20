@@ -1240,12 +1240,13 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
           const def = MODULE_REGISTRY[node.type];
           if (!def) return null;
           const isSelected = selectedNodeId === node.id;
+          const isHovered = hoveredNodeId === node.id;
           const isUpstream = upstreamNodeIds.has(node.id) && !isSelected;
           const isDownstream = downstreamNodeIds.has(node.id) && !isSelected;
           const isInputSource = def.category === 'source';
           const isMasterOutput = node.type === 'output';
           const isUnrelatedDuringFocus =
-            Boolean(focusNodeId) && !isSelected && !isUpstream && !isDownstream;
+            Boolean(focusNodeId) && !isSelected && !isHovered && !isUpstream && !isDownstream;
           const inPorts = def.ports.filter((p) => p.direction === 'in');
           const outPorts = def.ports.filter((p) => p.direction === 'out');
           const portRows = Math.max(inPorts.length, outPorts.length);
@@ -1260,18 +1261,24 @@ export const PatchbayCanvas: React.FC<PatchbayCanvasProps> = ({
                 : 'bg-white dark:bg-[#161D2E]';
 
           const cardBorderClass = isSelected
-            ? 'border-slate-900 dark:border-white ring-[3px] ring-amber-500/75 dark:ring-amber-400/75 shadow-lg'
-            : isUpstream && isDownstream
-              ? 'border-cyan-600 dark:border-cyan-400 ring-[3px] ring-cyan-500/50 dark:ring-cyan-400/50 shadow-md'
-              : isUpstream
+            ? 'border-slate-900 dark:border-white ring-[3px] ring-amber-500/75 dark:ring-amber-400/75 hover:ring-amber-500 dark:hover:ring-amber-300 shadow-lg'
+            : isHovered
+              ? isMasterOutput
+                ? 'border-emerald-700 dark:border-emerald-300 ring-2 ring-emerald-500/65 dark:ring-emerald-400/65 shadow-md'
+                : isModOrProc
+                  ? 'border-cyan-600 dark:border-cyan-300 ring-2 ring-cyan-500/65 dark:ring-cyan-400/65 shadow-md'
+                  : 'border-amber-600 dark:border-amber-300 ring-2 ring-amber-500/65 dark:ring-amber-400/65 shadow-md'
+              : isUpstream && isDownstream
                 ? 'border-cyan-600 dark:border-cyan-400 ring-[3px] ring-cyan-500/50 dark:ring-cyan-400/50 shadow-md'
-                : isDownstream
-                  ? 'border-emerald-600 dark:border-emerald-400 ring-[3px] ring-emerald-500/50 dark:ring-emerald-400/50 shadow-md'
-                  : isMasterOutput
-                    ? 'border-emerald-600 dark:border-emerald-400 ring-2 ring-emerald-500/50 dark:ring-emerald-400/45 shadow-md'
-                    : isInputSource
-                      ? 'border-amber-600 dark:border-amber-400 ring-2 ring-amber-500/45 dark:ring-amber-400/40 shadow-md'
-                      : 'border-slate-300 dark:border-slate-700/90 hover:border-slate-400 dark:hover:border-slate-600 shadow-xs dark:shadow-none';
+                : isUpstream
+                  ? 'border-cyan-600 dark:border-cyan-400 ring-[3px] ring-cyan-500/50 dark:ring-cyan-400/50 shadow-md'
+                  : isDownstream
+                    ? 'border-emerald-600 dark:border-emerald-400 ring-[3px] ring-emerald-500/50 dark:ring-emerald-400/50 shadow-md'
+                    : isMasterOutput
+                      ? 'border-emerald-600 dark:border-emerald-400 ring-2 ring-emerald-500/50 dark:ring-emerald-400/45 shadow-md'
+                      : isInputSource
+                        ? 'border-amber-600 dark:border-amber-400 ring-2 ring-amber-500/45 dark:ring-amber-400/40 shadow-md'
+                        : 'border-slate-300 dark:border-slate-700/90 shadow-xs dark:shadow-none';
 
           const headerBgClass = isUpstream && !isDownstream
             ? 'bg-cyan-100/95 dark:bg-cyan-900/55 border-cyan-300 dark:border-cyan-700/70'
